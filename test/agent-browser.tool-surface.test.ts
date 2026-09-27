@@ -107,6 +107,7 @@ test("registered browser code serializes for Anthropic while Pi still rejects in
 		assert.ok(payload);
 		const [wireTool] = payload.tools;
 		assert.equal(wireTool.name, "agent_browser_code");
+		assert.equal(Object.hasOwn(wireTool, "discovery"), false, "host discovery metadata must not become provider tool fields");
 		// Anthropic rejects integer minimum/maximum in strict tool schemas.
 		assert.equal(wireTool.strict ?? false, false);
 		assert.deepEqual(wireTool.input_schema.properties.timeoutMs, { type: "integer", minimum: 1, maximum: 300000 });

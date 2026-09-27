@@ -86,7 +86,7 @@ import { buildValidationFailureResult, resolveAgentBrowserInput, type AgentBrows
 import { applyAgentBrowserOutputPath, canWriteAgentBrowserOutput, normalizeRequestedOutputPath } from "./lib/orchestration/output-file.js";
 import { appendScriptSessionLease, createBrowserCodeOutput, getScriptSessionLeasesFromBranch } from "./lib/orchestration/script-mode.js";
 import { resolveBrowserExecutionIdentity, withBrowserExecutionLock, withBrowserExecutionLocks } from "./lib/managed-session-policy-lock.js";
-import { registerAgentBrowserToolSurface } from "./lib/tool-surface.js";
+import { AGENT_BROWSER_DISCOVERY_GROUP, registerAgentBrowserToolSurface } from "./lib/tool-surface.js";
 import type { AgentBrowserFailureCategory, FileArtifactMetadata, NetworkRouteRecord, SessionArtifactManifest } from "./lib/results/contracts.js";
 import { formatSessionArtifactRetentionSummary, getSessionArtifactManifestEntryKey, isPendingRecordingCommand, isSessionArtifactManifest, mergeSessionArtifactManifest, retirePendingRecordingManifestEntries } from "./lib/results/artifact-manifest.js";
 import { appendUniqueAgentBrowserNextActions, applyNamespaceToNextActions, applySessionToNextActions, buildNextToolAction, type AgentBrowserNextAction } from "./lib/results/next-actions.js";
@@ -1346,14 +1346,17 @@ export default function agentBrowserExtension(
 
 	const registerWebSearchToolIfAvailable = (configState: typeof agentBrowserConfig) => {
 		if (webSearchToolRegistered || !canRegisterWebSearchTool(configState)) return;
-		pi.registerTool(createAgentBrowserWebSearchTool(configState, {
-			loadConfigState(ctx) {
-				return loadAgentBrowserConfigSync({
-					cwd: ctx.cwd,
-					includeProjectConfig: shouldIncludeProjectConfig(ctx),
-				});
-			},
-		}));
+		pi.registerTool({
+			...{ discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "entry" as const } },
+			...createAgentBrowserWebSearchTool(configState, {
+				loadConfigState(ctx) {
+					return loadAgentBrowserConfigSync({
+						cwd: ctx.cwd,
+						includeProjectConfig: shouldIncludeProjectConfig(ctx),
+					});
+				},
+			}),
+		});
 		webSearchToolRegistered = true;
 	};
 
@@ -1518,7 +1521,8 @@ export default function agentBrowserExtension(
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!shouldAppendBrowserSystemPrompt(event.prompt)) {
+		const sectionTools = (event.systemPromptOptions as typeof event.systemPromptOptions & { sectionTools?: object })?.sectionTools;
+		if (!Object.hasOwn(sectionTools ?? {}, "agent_browser") && !shouldAppendBrowserSystemPrompt(event.prompt)) {
 			return undefined;
 		}
 		const runtimeConfig = loadAgentBrowserConfigSync({

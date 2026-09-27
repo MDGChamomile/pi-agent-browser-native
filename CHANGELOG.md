@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2 - 2026-09-27
+
+### Added
+
+- Supply extension-owned browser discovery metadata on capable Pi hosts, including conditional web search, without a user-maintained settings inventory. Official Pi retains its ordinary entry tools and lazy advanced loader.
+
+### Fixed
+
+- Prepare complete deferred browser instructions for generic prompts so same-run discovery reveals them before the first browser action.
+
 ## 0.8.1 - 2026-09-26
 
 ### Fixed

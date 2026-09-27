@@ -45,7 +45,7 @@ The agent gets a native tool, not a bash workaround:
 { "args": ["find", "text", "Learn React", "click"] }
 ```
 
-Use native commands for individual actions, `batch --bail` for fixed sequences, and `agent_browser_code` for loops or branches. Specialized tools are available through `agent_browser_tools`; see [common calls](#common-agent-calls).
+Use native commands for individual actions, `batch --bail` for fixed sequences, and `agent_browser_code` for loops or branches. Specialized tools are available through `agent_browser_tools`; see [common calls](#common-agent-calls). On hosts supporting extension-owned discovery, enable the `browser` group through `discover_tools` first. The extension supplies its own membership and instructions; no user-maintained tool inventory is needed. Official Pi keeps the ordinary direct/code/loader surface.
 
 The result is optimized for agent work:
 
