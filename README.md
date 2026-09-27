@@ -122,6 +122,14 @@ On 0.38.1, use `snapshot --delta` for native full/unchanged/changed revisions an
 
 ### Android / Termux
 
+Git/source installs and type checks require an **Android-native TypeScript 7 compiler**
+available as `tsgo` on `PATH`. The [Fold development environment](https://github.com/fitchmultz/fold-dev-environment)
+provides a pinned native build (validated here with `7.1.0-dev.20260904.1`).
+The npm TypeScript package has no Android binary, and its Linux binary probes a
+syscall blocked by Android. Build/type-check scripts therefore use native `tsgo`
+on Termux; macOS/Linux continue using the package-local pinned `tsc`.
+Published precompiled npm packages do not require a compiler at runtime.
+
 Android support currently uses Termux's system Chromium rather than Chrome for Testing. Upstream issue [vercel-labs/agent-browser#1587](https://github.com/vercel-labs/agent-browser/issues/1587) tracks native Android packaging; until upstream ships an Android launcher, install the packaged Linux-musl arm64 binary without lifecycle scripts and point the global command at it. The last locally validated Android setup used 0.36.0:
 
 ```bash

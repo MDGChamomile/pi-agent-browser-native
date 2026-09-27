@@ -56,3 +56,14 @@ appendFileSync("calls.jsonl", JSON.stringify(["build"]) + "\\n");
 		assert.deepEqual(calls, missingPath ? [["install", "--include=dev", "--ignore-scripts"], ["build"]] : [["build"]]);
 	});
 }
+
+test("prepare builds the extension with the platform compiler without changing the source lock", async () => {
+	const before = await readFile("package-lock.json", "utf8");
+	await execFile(process.execPath, ["scripts/prepare.mjs"], {
+		env: { ...process.env, npm_config_offline: "true" },
+		maxBuffer: 20 * 1024 * 1024,
+		timeout: 120_000,
+	});
+	assert.match(await readFile("dist/extensions/agent-browser/index.js", "utf8"), /agent_browser/);
+	assert.equal(await readFile("package-lock.json", "utf8"), before);
+});
