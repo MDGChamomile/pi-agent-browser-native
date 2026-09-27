@@ -12,7 +12,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Type } from "typebox";
 
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
 	createAssistantMessageEventStream,
 	type AssistantMessage,
@@ -33,6 +33,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import agentBrowserExtension from "../extensions/agent-browser/index.js";
+import { PROJECT_RULE_PROMPT, RUNTIME_PROMPT_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	readInvocationLog,
 	withPatchedEnv,
@@ -99,7 +100,7 @@ function streamTextResponse(model: Model<any>, text: string) {
 	return stream;
 }
 
-function createToolCallingStream(toolArguments: ToolCall["arguments"], priorCalls: ToolCall[] = [], toolName = "agent_browser") {
+function createToolCallingStream(toolArguments: ToolCall["arguments"], priorCalls: ToolCall[] = [], toolName = "agent_browser", toolCallId = "call_agent_browser_pipeline") {
 	return (model: Model<any>, context: Context, _options?: SimpleStreamOptions) => {
 		const hasToolResult = context.messages.some((message) => message.role === "toolResult" && message.toolName === toolName);
 		if (hasToolResult) return streamTextResponse(model, "Observed agent_browser result.");
@@ -109,7 +110,7 @@ function createToolCallingStream(toolArguments: ToolCall["arguments"], priorCall
 			const output = createAssistantMessage(model, "toolUse");
 			const toolCall = {
 				arguments: toolArguments,
-				id: "call_agent_browser_pipeline",
+				id: toolCallId,
 				name: toolName,
 				type: "toolCall" as const,
 			};
@@ -158,7 +159,7 @@ async function readPersistedAgentBrowserResult(sessionDir: string): Promise<{ re
 	return { result, sessionFile };
 }
 
-function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: ToolCall["arguments"], priorCalls?: ToolCall[], toolName?: string): Model<any> {
+function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: ToolCall["arguments"], priorCalls?: ToolCall[], toolName?: string, discoveryStream?: ReturnType<typeof createToolCallingStream>): Model<any> {
 	modelRuntime.registerProvider(PIPELINE_PROVIDER, {
 		api: "openai-completions",
 		apiKey: "piab-pipeline-key",
@@ -171,8 +172,9 @@ function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: Too
 			maxTokens: 4096,
 			name: "Pi Agent Browser Pipeline Test",
 			reasoning: false,
+			...(discoveryStream ? { compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true } } : {}),
 		}],
-		streamSimple: createToolCallingStream(toolArguments, priorCalls, toolName),
+		streamSimple: discoveryStream ?? createToolCallingStream(toolArguments, priorCalls, toolName),
 	});
 	const model = modelRuntime.getModel(PIPELINE_PROVIDER, PIPELINE_MODEL_ID);
 	assert.ok(model, "pipeline test model should be registered");
@@ -181,6 +183,7 @@ function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: Too
 
 async function runPipelinePrompt(options: {
 	fakeScript: string;
+	discoveryStream?: ReturnType<typeof createToolCallingStream>;
 	toolArguments: ToolCall["arguments"];
 	toolName?: string;
 	extensionFactory?: ExtensionFactory;
@@ -198,13 +201,13 @@ async function runPipelinePrompt(options: {
 	);
 
 	try {
-		return await withPatchedEnv<PipelinePromptResult>({ PATH: `${tempDir}:${basePath}` }, async () => {
+		return await withPatchedEnv<PipelinePromptResult>({ PATH: `${tempDir}:${basePath}`, ...(options.discoveryStream ? { HOME: join(tempDir, "home") } : {}) }, async () => {
 			const modelRuntime = await ModelRuntime.create({
 				allowModelNetwork: false,
 				credentials: new InMemoryCredentialStore(),
 				modelsPath: null,
 			});
-			const model = registerPipelineProvider(modelRuntime, options.toolArguments, options.priorCalls, options.toolName);
+			const model = registerPipelineProvider(modelRuntime, options.toolArguments, options.priorCalls, options.toolName, options.discoveryStream);
 			const resourceLoader = new DefaultResourceLoader({
 				agentDir: tempDir,
 				cwd: tempDir,
@@ -230,14 +233,14 @@ async function runPipelinePrompt(options: {
 				settingsManager: SettingsManager.inMemory(),
 				resourceLoader,
 				sessionManager: SessionManager.create(tempDir, sessionDir, { id: "piab-pipeline-session" }),
-				tools: [...(options.priorCalls ?? []).map((call) => call.name), options.toolName ?? "agent_browser"],
+				tools: options.discoveryStream ? undefined : [...(options.priorCalls ?? []).map((call) => call.name), options.toolName ?? "agent_browser"],
 			});
 			try {
 				await session.bindExtensions({ onError: (error) => { throw new Error(error.error); } });
 				if (options.runPrompt) await options.runPrompt(session);
 				else await session.prompt("Use agent_browser once.");
 				const inMemoryResult = session.messages.find(isAgentBrowserToolResult);
-				assert.ok(inMemoryResult, "agent_browser tool result should be recorded by Pi");
+				assert.ok(inMemoryResult, `agent_browser tool result should be recorded by Pi: ${session.messages.filter(message => message.role === "assistant" && message.errorMessage).map(message => message.role === "assistant" ? message.errorMessage : "").join("; ")}`);
 				const persisted = await readPersistedAgentBrowserResult(sessionDir);
 				return {
 					inMemoryResult,
@@ -252,6 +255,52 @@ async function runPipelinePrompt(options: {
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
 	}
+}
+
+for (const webSearch of ["absent", "startup", "late"] as const) {
+	test(`Pi pipeline reveals complete browser instructions after discovery on a generic prompt before execution (web search: ${webSearch})`, { skip: process.env.PI_AGENT_BROWSER_NATIVE_DISCOVERY !== "1" }, async () => {
+		let hookCalls = 0;
+		let executionCalls = 0;
+		let requests = 0;
+		const pipeline = await withPatchedEnv({ EXA_API_KEY: undefined, BRAVE_API_KEY: webSearch === "startup" ? "test-only-key" : undefined, PI_AGENT_BROWSER_CONFIG: undefined }, () => runPipelinePrompt({
+			toolArguments: { args: ["--help"] },
+			extensionFactory(pi) {
+				if (webSearch === "late") pi.on("session_start", async (_event, ctx) => {
+					const directory = join(ctx.cwd, ".pi/config/pi-agent-browser-native");
+					await mkdir(directory, { recursive: true });
+					await writeFile(join(directory, "config.json"), JSON.stringify({ version: 1, webSearch: { braveApiKey: "test-only-key" } }));
+				});
+				agentBrowserExtension(pi, { async beforeExecute() { executionCalls++; } });
+				pi.on("before_agent_start", () => { hookCalls++; });
+			},
+			discoveryStream(model, context, options) {
+				requests++;
+				const names = getCurrentTools(context.messages).map(tool => tool.name);
+				const prompt = getCurrentSystemPrompt(context.messages);
+				if (requests === 1) {
+					assert.deepEqual(names, ["discover_tools"]);
+					assert.ok(!prompt.includes(PROJECT_RULE_PROMPT));
+					return createToolCallingStream({ enable: ["browser"] }, [], "discover_tools", "call_discovery_pipeline")(model, context, options);
+				}
+				assert.ok(prompt.includes(PROJECT_RULE_PROMPT), "complete deferred browser section must be visible in this same run");
+				for (const guideline of RUNTIME_PROMPT_GUIDELINES) assert.ok(prompt.includes(guideline), guideline);
+				assert.ok(names.includes("agent_browser"));
+				assert.ok(names.includes("agent_browser_code"));
+				assert.ok(names.includes("agent_browser_tools"));
+				assert.equal(names.includes("agent_browser_web_search"), webSearch !== "absent");
+				assert.ok(!names.includes("agent_browser_qa"), "discovery must not enable advanced tools");
+				assert.equal(hookCalls, 1, "activation must not rerun before_agent_start");
+				if (requests === 2) assert.equal(executionCalls, 0, "instructions precede first execution");
+				return createToolCallingStream({ args: ["--help"] })(model, context, options);
+			},
+			async runPrompt(session) { await session.prompt("Please continue."); },
+			fakeScript: `process.stdout.write("agent-browser help fixture");`,
+		}));
+		assert.equal(requests, 3);
+		assert.equal(executionCalls, 1);
+		assert.equal(pipeline.persistedResult.isError, false);
+		assert.deepEqual(pipeline.invocations.map(({ args }) => args), [["--help"]]);
+	});
 }
 
 test("Pi pipeline captures the owner cwd before an awaited browser policy without moving native ctx", async () => {

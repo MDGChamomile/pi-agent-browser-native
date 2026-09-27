@@ -23,6 +23,10 @@ The package install path is the primary product path. Local checkout development
 
 Optional `agent_browser_web_search` remains separately credential/config gated and independent of browser state.
 
+Registration-owned `discovery` metadata uses one `AGENT_BROWSER_DISCOVERY_GROUP` descriptor in `lib/tool-surface.ts` (`browser`, section `agent_browser`). Direct, code, loader, and conditional/late web search registrations are entry tools; the existing five specialized registrations are advanced tools. Capable hosts derive membership from the permitted registry, without another name catalog or user configuration. Official Pi ignores the metadata. The advanced loader and native selected-tool history remain unchanged.
+
+`before_agent_start` prepares the complete browser section when `systemPromptOptions.sectionTools` has its own `agent_browser` key, including generic prompts. An empty map, another extension's key, or an inherited key does not trigger it. Without that ownership, the existing keyword gate applies. The host retains hidden section text and reveals it during same-run discovery; the extension never reruns the hook or replaces an opaque full system prompt. Project guidance and all execution guards retain their existing paths.
+
 ### Direct subprocess execution
 
 The extension should:

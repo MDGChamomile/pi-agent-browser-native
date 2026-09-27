@@ -37,11 +37,21 @@ export const AGENT_BROWSER_TOOL_INVENTORY = {
 	network: { name: "agent_browser_network_source", description: "Correlate failed requests with initiator and local-source candidates." },
 } as const satisfies Record<AgentBrowserAdvancedTool, { name: string; description: string }>;
 
+export const AGENT_BROWSER_DISCOVERY_GROUP = {
+	name: "browser",
+	description: "Search the web, browse and interact with pages, verify browser UI, and inspect Electron apps.",
+	sections: ["agent_browser"],
+} as const;
+
+const entryDiscovery = { discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "entry" as const } };
+const advancedDiscovery = { discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "advanced" as const } };
+
 const advancedNames = new Set<string>(Object.values(AGENT_BROWSER_TOOL_INVENTORY).map(({ name }) => name));
 
 /** Register once; advanced calls adapt only their input shape and reuse the ordinary executor. */
 export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: AgentBrowserToolSurfaceOptions): void {
 	pi.registerTool({
+		...entryDiscovery,
 		name: "agent_browser",
 		label: "Agent Browser",
 		description: "Browse and interact through native agent-browser commands. One command in args; fixed sequences use batch --bail and JSON-array stdin. Use agent_browser_code for loops/branches and agent_browser_tools for advanced capabilities.",
@@ -54,6 +64,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		executionMode: options.executionMode,
 	});
 	pi.registerTool({
+		...entryDiscovery,
 		name: "agent_browser_code",
 		label: "Agent Browser Code",
 		description: "Run fresh JavaScript against a persistent browser. await browser({args,stdin?,timeoutMs?}) returns success/data/error/nextActions and imageObservations; emit(selected JSON) and emitImage(image handle) explicitly choose output. No host APIs or imports. Use native batch for fixed sequences.",
@@ -70,6 +81,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 	});
 
 	pi.registerTool({
+		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.action,
 		label: "Browser Action",
 		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.action],
@@ -81,6 +93,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
+		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.qa,
 		label: "Browser QA",
 		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.qa],
@@ -92,6 +105,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
+		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.electron,
 		label: "Browser Electron",
 		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.electron],
@@ -103,6 +117,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
+		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.source,
 		label: "Browser Source",
 		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.source],
@@ -114,6 +129,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
+		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.network,
 		label: "Browser Network Source",
 		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.network],
@@ -125,6 +141,7 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
+		...entryDiscovery,
 		name: "agent_browser_tools",
 		label: "Browser Tools",
 		description: "List or enable advanced browser tools: action → agent_browser_action; qa → agent_browser_qa; electron → agent_browser_electron; source → agent_browser_source; network → agent_browser_network_source. Omit enable for inventory. Activation only adds tools; it preserves other active tools.",
