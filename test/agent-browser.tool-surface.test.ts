@@ -236,3 +236,14 @@ test("prompt routing is compact and preserves browser authority, recovery, and i
 		assert.ok(guidelines.every((line) => line.includes(toolName)), `${key} guidelines must name their tool`);
 	}
 });
+
+test("every registered browser tool exposes an object-rooted parameter schema", async () => {
+	await withSurface(async ({ all, session }) => {
+		for (const name of all().filter((name) => name.startsWith("agent_browser"))) {
+			const tool = session.getToolDefinition(name);
+			assert.ok(tool, `registered ${name}`);
+			// Strict providers reject a schema whose root lacks `type: "object"`.
+			assert.equal((tool.parameters as { type?: unknown }).type, "object", `${name} root schema type`);
+		}
+	});
+});

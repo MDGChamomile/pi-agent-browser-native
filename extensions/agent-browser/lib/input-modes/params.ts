@@ -166,41 +166,35 @@ export function createAgentBrowserQaParamsSchema(Type: JsonSchemaBuilder = JsonS
 export function createAgentBrowserElectronParamsSchema(Type: JsonSchemaBuilder = JsonSchema, StringEnum: StringEnumBuilder = localStringEnum) {
 	const common = { outputPath: outputProperties(Type).outputPath };
 	const timeoutMs = Type.Optional(Type.Integer({ minimum: 1 }));
-	return Type.Unsafe<AgentBrowserElectronParams>(Type.Union([
-		Type.Object({
-			action: StringEnum(["list"] as const),
-			query: Type.Optional(Type.String({ description: "Case-insensitive app filter.", minLength: 1 })),
-			maxResults: Type.Optional(Type.Integer({ description: `Result cap; default ${ELECTRON_DISCOVERY_DEFAULT_MAX_RESULTS}, clamped to ${ELECTRON_DISCOVERY_MAX_RESULTS}.`, minimum: 1 })),
-			...common,
-		}, { additionalProperties: false }),
-		Type.Object({
-			action: StringEnum(["launch"] as const),
-			appPath: Type.Optional(Type.String({ description: "macOS .app path.", minLength: 1 })),
-			appName: Type.Optional(Type.String({ description: "Name from agent_browser_electron list.", minLength: 1 })),
-			bundleId: Type.Optional(Type.String({ minLength: 1 })),
-			executablePath: Type.Optional(Type.String({ minLength: 1 })),
-			appArgs: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-			handoff: Type.Optional(StringEnum(AGENT_BROWSER_ELECTRON_HANDOFFS)),
-			targetType: Type.Optional(StringEnum(AGENT_BROWSER_ELECTRON_TARGET_TYPES)),
-			timeoutMs,
-			allow: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-			deny: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-			...common,
-		}, { additionalProperties: false }),
-		Type.Object({
-			action: StringEnum(["status", "cleanup"] as const),
-			launchId: Type.Optional(Type.String({ minLength: 1 })),
-			all: Type.Optional(Type.Literal(true)),
-			timeoutMs,
-			...common,
-		}, { additionalProperties: false, not: { required: ["launchId", "all"] } }),
-		Type.Object({
-			action: StringEnum(["probe"] as const),
-			launchId: Type.Optional(Type.String({ minLength: 1 })),
-			timeoutMs,
-			...common,
-		}, { additionalProperties: false }),
-	]));
+	// Providers that require an object-rooted JSON Schema (e.g. DeepSeek through a strict
+	// gateway) reject a bare `anyOf` union whose root has no `type`. Keep a top-level object
+	// and move the action-specific constraints into `anyOf`, mirroring the action/qa schemas.
+	return Type.Unsafe<AgentBrowserElectronParams>(Type.Object({
+		action: StringEnum(["list", "launch", "status", "cleanup", "probe"] as const),
+		query: Type.Optional(Type.String({ description: "Case-insensitive app filter.", minLength: 1 })),
+		maxResults: Type.Optional(Type.Integer({ description: `Result cap; default ${ELECTRON_DISCOVERY_DEFAULT_MAX_RESULTS}, clamped to ${ELECTRON_DISCOVERY_MAX_RESULTS}.`, minimum: 1 })),
+		appPath: Type.Optional(Type.String({ description: "macOS .app path.", minLength: 1 })),
+		appName: Type.Optional(Type.String({ description: "Name from agent_browser_electron list.", minLength: 1 })),
+		bundleId: Type.Optional(Type.String({ minLength: 1 })),
+		executablePath: Type.Optional(Type.String({ minLength: 1 })),
+		appArgs: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+		handoff: Type.Optional(StringEnum(AGENT_BROWSER_ELECTRON_HANDOFFS)),
+		targetType: Type.Optional(StringEnum(AGENT_BROWSER_ELECTRON_TARGET_TYPES)),
+		timeoutMs,
+		allow: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+		deny: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+		launchId: Type.Optional(Type.String({ minLength: 1 })),
+		all: Type.Optional(Type.Literal(true)),
+		...common,
+	}, {
+		additionalProperties: false,
+		anyOf: [
+			Type.Object({ action: StringEnum(["list"] as const) }),
+			Type.Object({ action: StringEnum(["launch"] as const) }),
+			Type.Object({ action: StringEnum(["status", "cleanup"] as const) }, { not: { required: ["launchId", "all"] } }),
+			Type.Object({ action: StringEnum(["probe"] as const) }),
+		],
+	}));
 }
 
 export function createAgentBrowserSourceParamsSchema(Type: JsonSchemaBuilder = JsonSchema, StringEnum: StringEnumBuilder = localStringEnum) {
