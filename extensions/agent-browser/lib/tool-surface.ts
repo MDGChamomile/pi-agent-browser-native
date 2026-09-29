@@ -172,10 +172,18 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		// A host-filtered catalog is an explicit selection, not our default surface.
 		const available = new Set(pi.getAllTools().map(({ name }) => name));
 		if (!["agent_browser", "agent_browser_code", "agent_browser_tools", ...advancedNames].every(name => available.has(name))) return;
-		// Keep Pi's replay helper behind the awaited restoration boundary, not factory registration.
-		const { getCurrentSystemMessage } = await import("@earendil-works/pi-ai");
-		const current = getCurrentSystemMessage(ctx.sessionManager.buildSessionProjection().messages);
-		const restored = new Set(current?.toolsAdded?.map(({ name }) => name));
+		// Fold Pi transcript tool deltas locally: Pi installs packages with peers
+		// omitted and native dynamic import() bypasses Pi's jiti alias for
+		// host-supplied "@earendil-works/pi-ai", so a runtime import of its
+		// getCurrentSystemMessage helper fails in consumer installs with
+		// "Cannot find package '@earendil-works/pi-ai'". Only tool identity
+		// matters here, so replay toolsAdded/toolsRemoved directly.
+		const restored = new Set<string>();
+		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
+			if (message.role !== "system") continue;
+			for (const removed of message.toolsRemoved ?? []) restored.delete(removed.name);
+			for (const added of message.toolsAdded ?? []) restored.add(added.name);
+		}
 		const active = pi.getActiveTools().filter((name) => !advancedNames.has(name) || restored.has(name));
 		pi.setActiveTools([...new Set([...active, ...[...restored].filter((name) => advancedNames.has(name) && available.has(name))])]);
 	});
