@@ -230,7 +230,7 @@ Call `agent_browser_tools {}` for inventory, then enable required capabilities:
 { "enable": ["action", "qa", "electron", "source", "network"] }
 ```
 
-On hosts supporting extension-owned discovery, first enable the `browser` group with `discover_tools`; its entry surface includes direct commands, code, this advanced loader, and web search when configured. The group is defined by registrations, not a user-maintained inventory. Official Pi exposes the ordinary entry tools without this host-level discovery step.
+On hosts supporting instruction groups, first enable `browser` with `discover_tools` to receive full browser and advanced guidance and reveal selected declarations. The extension registers its own group through `pi:instruction-groups`; this step changes neither callable permissions nor advanced-tool selection. Official Pi receives the same full guidance eagerly without this discovery step. The separate advanced loader below retains its activation semantics.
 
 Activation is additive and uses native Pi selected-tool history. Omit CLI `--tools` for normal lazy activation, or include desired advanced tools in that explicit selection; excluded tools remain unavailable. The tools take flat input:
 

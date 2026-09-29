@@ -9,7 +9,7 @@ import { resolveExecutionCwd } from "../extensions/agent-browser/lib/execution-c
 const ctx = { cwd: process.cwd(), sessionManager: {} } as Pick<ExtensionContext, "cwd" | "sessionManager">;
 const api = (emit: ExtensionAPI["events"]["emit"] = () => {}, sources: { tools?: SourceInfo[]; commands?: SourceInfo[] } = {}) => ({
 	events: { emit, on: () => () => {} },
-	getAllTools: () => (sources.tools ?? []).map(sourceInfo => ({ id: "change_dir", name: "change_dir", description: "Fixture", parameters: {}, promptGuidelines: [], sourceInfo })),
+	getAllTools: () => (sources.tools ?? []).map(sourceInfo => ({ id: "change_dir", name: "change_dir", description: "Fixture", parameters: {}, promptGuidelines: [], exposure: "direct" as const, sourceInfo })),
 	getCommands: () => (sources.commands ?? []).map(sourceInfo => ({ name: "cwd:1", source: "extension" as const, sourceInfo })),
 });
 

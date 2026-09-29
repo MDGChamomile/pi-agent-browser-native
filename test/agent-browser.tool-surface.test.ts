@@ -64,7 +64,7 @@ async function withSurface(
 					const tool = session.getToolDefinition(name);
 					assert.ok(tool, `registered ${name}`);
 					const params = validateToolArguments(tool, { type: "toolCall", name, id: "surface", arguments: input });
-					return tool.execute("surface", params, undefined, undefined, context);
+					return tool.execute("surface", params, undefined, undefined, context as Parameters<typeof tool.execute>[4]);
 				},
 				active: () => session.getActiveToolNames(),
 				all: () => session.getAllTools().map(({ name }) => name),

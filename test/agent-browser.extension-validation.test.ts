@@ -33,6 +33,7 @@ import {
 } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	createExtensionHarness,
+	getBrowserInstructions,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
@@ -47,22 +48,7 @@ import {
 	createRenderContext,
 } from "./helpers/extension-validation-fixtures.js";
 
-test("agentBrowserExtension names its tools in every prompt guideline", () => {
-	const harness = createExtensionHarness({ cwd: process.cwd(), prompt: "Inspect a page." });
-	assert.ok(harness.tool.promptGuidelines.length > 0);
-	for (const guideline of harness.tool.promptGuidelines) {
-		assert.match(guideline, /agent_browser/, guideline);
-	}
-	assert.match(harness.tool.promptGuidelines.join("\n"), /agent_browser_code.*loops\/branches/);
-	const webSearchTool = harness.getTool("agent_browser_web_search");
-	if (webSearchTool) {
-		for (const guideline of webSearchTool.promptGuidelines) {
-			assert.match(guideline, /agent_browser_web_search/, guideline);
-		}
-	}
-});
-
-test("agentBrowserExtension keeps concise browser guidance plus installed doc pointers in tool metadata", async () => {
+test("agentBrowserExtension keeps full browser guidance and installed doc pointers in its prompt section", async () => {
 	const isolatedHome = await mkdtemp(join(tmpdir(), "pi-agent-browser-guidance-test-"));
 	await withPatchedEnv({ BRAVE_API_KEY: "demo-key", EXA_API_KEY: undefined, HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: process.cwd() });
@@ -82,11 +68,11 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 			commandReferencePath: join(process.cwd(), "docs", "COMMAND_REFERENCE.md"),
 			toolContractPath: join(process.cwd(), "docs", "TOOL_CONTRACT.md"),
 		});
-		const guidelineText = harness.tool.promptGuidelines.join("\n");
+		const guidelineText = await getBrowserInstructions(harness);
 		const webSearchTool = harness.getTool("agent_browser_web_search");
 		assert.ok(webSearchTool, "web search tool should register from BRAVE_API_KEY");
-		assert.equal(webSearchTool.promptGuidelines.includes(WEB_SEARCH_PROMPT_GUIDELINE), true);
-		assert.equal(harness.tool.promptGuidelines.includes("Prefer agent_browser_web_search for facts; agent_browser for pages."), true);
+		assert.equal(guidelineText.includes(WEB_SEARCH_PROMPT_GUIDELINE), true);
+		assert.equal(guidelineText.includes("Prefer agent_browser_web_search for facts; agent_browser for pages."), true);
 		const requiredGuidelines = [
 			docsGuideline,
 			...RUNTIME_PROMPT_GUIDELINES,
@@ -94,7 +80,7 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		];
 		for (const guideline of requiredGuidelines) {
 			assert.equal(
-				harness.tool.promptGuidelines.includes(guideline),
+				guidelineText.includes(guideline),
 				true,
 				`missing concise runtime guideline: ${guideline}`,
 			);
@@ -128,8 +114,8 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		assert.match(guidelineText, /ffmpeg before start/);
 		assert.match(guidelineText, /Verify nested scrolling/);
 		assert.match(guidelineText, /follow visible nextActions/);
-		assert.equal(harness.tool.promptGuidelines.includes(SHARED_BROWSER_PLAYBOOK_GUIDELINES[12]), false);
-		assert.equal(harness.tool.promptGuidelines.includes(QUICK_START_GUIDELINES[0]), false);
+		assert.equal(guidelineText.includes(SHARED_BROWSER_PLAYBOOK_GUIDELINES[12]), true);
+		assert.equal(guidelineText.includes(QUICK_START_GUIDELINES[0]), true);
 		assert.equal(
 			SHARED_BROWSER_PLAYBOOK_GUIDELINES.some((line) => line.includes("evidence-only screenshots")),
 			true,
@@ -142,12 +128,7 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		assert.doesNotMatch(fullPlaybookText, /diff snapshot\/screenshot\/url/);
 		assert.match(fullPlaybookText, /clipboard write <text>/);
 		assert.doesNotMatch(fullPlaybookText, /clipboard read\/write\/copy\/paste/);
-		assert.ok(harness.tool.promptGuidelines.length <= 12, "promptGuidelines should stay bounded");
-		const normalizedGuidelineText = guidelineText.split(process.cwd()).join("<cwd>");
-		assert.ok(
-			normalizedGuidelineText.length < 3_800,
-			"promptGuidelines should point to docs instead of carrying the full command reference/playbook",
-		);
+		assert.deepEqual(harness.tool.promptGuidelines, [], "guidance belongs to the instruction owner, not eager tool metadata");
 		assert.equal(
 			WRAPPER_TAB_RECOVERY_BEHAVIOR.some((line) => line.includes("Routine same-session calls skip tab-list preflights")),
 			true,
@@ -156,7 +137,7 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		const [genericTurn] = await runExtensionEventResults<{ systemPrompt: string }>(
 			harness.handlers,
 			"before_agent_start",
-			{ prompt: "Please review the repository architecture.", systemPrompt: "Base system prompt" },
+			{ prompt: "Please review the repository architecture.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} } },
 			harness.ctx,
 		);
 		assert.equal(genericTurn, undefined);
@@ -172,14 +153,17 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 
 test("built extension prompt doc pointers resolve to package-root docs", { skip: !existsSync(resolve("dist/extensions/agent-browser/index.js")) }, async () => {
 	const extension = await import(pathToFileURL(resolve("dist/extensions/agent-browser/index.js")).href);
-	const tools: Array<{ name: string; promptGuidelines: string[] }> = [];
+	let beforeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
 	const pi = {
-		on: (..._args: unknown[]) => undefined,
-		registerTool: (tool: { name: string; promptGuidelines?: string[] }) => tools.push({ name: tool.name, promptGuidelines: tool.promptGuidelines ?? [] }),
+		events: { on: () => () => {} },
+		on: (name: string, handler: typeof beforeStart) => { if (name === "before_agent_start") beforeStart = handler; },
+		registerTool: () => {},
 	};
 	(extension.default as (api: typeof pi) => void)(pi);
 
-	const guideline = tools.find((tool) => tool.name === "agent_browser")?.promptGuidelines.find((line) => line.includes("COMMAND_REFERENCE.md"));
+	const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
+	await beforeStart!(event, { cwd: process.cwd() });
+	const guideline = event.systemPromptOptions.sections.agent_browser?.split("\n").find(line => line.includes("COMMAND_REFERENCE.md"));
 	assert.ok(guideline);
 	assert.doesNotMatch(guideline, /\/dist\/docs\//);
 	for (const docsPath of [resolve("README.md"), resolve("docs/COMMAND_REFERENCE.md"), resolve("docs/TOOL_CONTRACT.md")]) {
@@ -200,7 +184,7 @@ test("agentBrowserExtension includes configured browser executable guidance", as
 	}, null, 2), "utf8");
 	await withPatchedEnv({ HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: process.cwd() });
-		const guidelineText = harness.tool.promptGuidelines.join("\n");
+		const guidelineText = await getBrowserInstructions(harness);
 		assert.match(guidelineText, /browser\.executablePath/);
 		assert.match(guidelineText, /--executable-path/);
 		assert.match(guidelineText, /profiles lists Chrome profiles only/);
@@ -238,7 +222,7 @@ test("agentBrowserExtension uses project browser launch guidance when project co
 				const staticGuidelineText = harness.tool.promptGuidelines.join("\n");
 				assert.doesNotMatch(staticGuidelineText, /Project Profile/);
 				assert.doesNotMatch(staticGuidelineText, /\/tmp\/project-browser/);
-				assert.match(staticGuidelineText, /Global Profile/);
+				assert.equal(staticGuidelineText, "", "no eager configuration guidelines");
 				const browserTurn = { prompt: "Open https://example.com in the signed-in browser.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} as Record<string, string> } };
 				await runExtensionEvent(harness.handlers, "before_agent_start", browserTurn, harness.ctx);
 				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /Project Profile/);
@@ -272,9 +256,9 @@ test("agentBrowserExtension includes project-local browser launch guidance", asy
 		try {
 			await withPatchedEnv({ HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 				const harness = createExtensionHarness({ cwd });
-				const guidelineText = harness.tool.promptGuidelines.join("\n");
-				assert.doesNotMatch(guidelineText, /Project Profile/);
-				assert.doesNotMatch(guidelineText, /\/tmp\/project-browser/);
+				const guidelineText = await getBrowserInstructions(harness);
+				assert.match(guidelineText, /Project Profile/);
+				assert.match(guidelineText, /\/tmp\/project-browser/);
 				const browserTurn = { prompt: "Open https://example.com with the configured browser profile.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} as Record<string, string> } };
 				await runExtensionEvent(harness.handlers, "before_agent_start", browserTurn, harness.ctx);
 				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /Project Profile/);

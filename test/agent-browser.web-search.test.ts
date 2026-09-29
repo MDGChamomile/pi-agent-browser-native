@@ -28,7 +28,7 @@ import {
 	normalizeExaSearchResult,
 	normalizeBraveSearchResult,
 } from "../extensions/agent-browser/lib/web-search.js";
-import { createExtensionHarness, executeRegisteredTool, runExtensionEvent, withPatchedEnv } from "./helpers/agent-browser-harness.js";
+import { createExtensionHarness, executeRegisteredTool, getBrowserInstructions, runExtensionEvent, withPatchedEnv } from "./helpers/agent-browser-harness.js";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
@@ -84,7 +84,7 @@ test("does not register agent_browser_web_search without env or config credentia
 	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: undefined, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: fixture.cwd });
 		assert.equal(harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME), undefined);
-		assert.equal(harness.getTool("agent_browser")?.promptGuidelines.includes("Use agent_browser for real browser or live web content."), true);
+		assert.equal((await getBrowserInstructions(harness)).includes("Use agent_browser for real browser or live web content."), true);
 	});
 });
 
@@ -211,7 +211,7 @@ test("registers agent_browser_web_search with actionable search-type and rate-li
 		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
 		assert.ok(tool);
 		assert.ok(harness.getTool("agent_browser"));
-		const guidelines = tool.promptGuidelines.join("\n");
+		const guidelines = await getBrowserInstructions(harness);
 		assert.match(guidelines, /Prefer agent_browser_web_search for current or external web facts/);
 		assert.match(guidelines, /searchType.*deep-lite/);
 		assert.match(guidelines, /Do not run parallel agent_browser_web_search calls/);

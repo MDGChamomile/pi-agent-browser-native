@@ -34,16 +34,17 @@ async function measureColdStartup(entrypoint: string): Promise<StartupMeasuremen
 const start = performance.now();
 const extension = await import(${JSON.stringify(entrypoint)});
 const imported = performance.now();
+const registeredEvents = [];
 const pi = {
-  events: [],
+  events: { on(...args) { registeredEvents.push(args); } },
   tools: [],
-  on(...args) { this.events.push(args); },
+  on(...args) { registeredEvents.push(args); },
   registerTool(tool) { this.tools.push(tool); },
 };
 extension.default(pi);
 const registered = performance.now();
 console.log(JSON.stringify({
-  events: pi.events.length,
+  events: registeredEvents.length,
   importMs: imported - start,
   tools: pi.tools.map((tool) => tool.name),
   totalMs: registered - start,
