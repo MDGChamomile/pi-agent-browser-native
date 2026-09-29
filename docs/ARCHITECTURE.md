@@ -23,9 +23,9 @@ The package install path is the primary product path. Local checkout development
 
 Optional `agent_browser_web_search` remains separately credential/config gated and independent of browser state.
 
-Registration-owned `discovery` metadata uses one `AGENT_BROWSER_DISCOVERY_GROUP` descriptor in `lib/tool-surface.ts` (`browser`, section `agent_browser`). Direct, code, loader, and conditional/late web search registrations are entry tools; the existing five specialized registrations are advanced tools. Capable hosts derive membership from the permitted registry, without another name catalog or user configuration. Official Pi ignores the metadata. The advanced loader and native selected-tool history remain unchanged.
+The extension factory subscribes synchronously to the public `pi:instruction-groups` bus and registers `browser` with its direct/code/loader, advanced, and conditional web-search names. `fullInstructions(ctx)` is the sole delivery source: project rules, trusted runtime config, full shared playbook, tab recovery, every advanced guideline, and conditional web-search guidance. The callback reads current config rather than retaining startup-only guidance.
 
-`before_agent_start` prepares the complete browser section when `systemPromptOptions.sectionTools` has its own `agent_browser` key, including generic prompts. An empty map, another extension's key, or an inherited key does not trigger it. Without that ownership, the existing keyword gate applies. The host retains hidden section text and reveals it during same-run discovery; the extension never reruns the hook or replaces an opaque full system prompt. Project guidance and all execution guards retain their existing paths.
+The collector's dynamic `isManaged()` decides ownership. Managed Pi delivers full text on group enable and repairs it after compaction; `before_agent_start` adds no duplicate browser section. Without management, including stock Pi or disabled discovery, that hook eagerly supplies the same full text in the named `agent_browser` section on every prompt. No `ToolDefinition.discovery`, `sectionTools` detection, keyword gate, or full system-prompt replacement remains. Registration and group enablement do not change callable permissions, tool names/namespaces, startup selection, or the separate advanced loader.
 
 ### Direct subprocess execution
 
@@ -91,9 +91,9 @@ Global/override package profile names with `policy: "always"` and executable def
 
 Use Pi-native `promptGuidelines`, tool declarations, and named `systemPromptOptions.sections` contributions. Do not return a replacement full system prompt from `before_agent_start`: it breaks additive declaration anchoring. Official Pi 0.87 and the fork use this same composition; optional fork checkpoint hooks do not make hosted programmatic tool calling, async provider lifecycle, image-detail overrides, or model-specific payload edits package dependencies. Prefix stability is not proof of a cache hit.
 
-Runtime `promptGuidelines` are a Tier A budget, not a full manual. They stay short enough to load on every `agent_browser`-aware turn and carry only high-impact rules: input-mode choice, the open → snapshot → ref loop, launch-scoped session handling, artifact verification, structured `nextActions`, extraction basics, and hard agent-responsibility boundaries: honor explicit stop boundaries, allow ordinary requested non-destructive submissions in authenticated unattended/auto-approved employee flows, and require explicit authorization for purchases, production-control, destructive/irreversible, or account/security/privacy changes.
+Browser instructions come from one full source assembled from `lib/playbook.ts` and current trusted config. Shared rules and all advanced tool guidelines are delivered together, rather than maintaining a short eager summary beside a hidden manual. Managed hosts defer this full group; stock hosts receive it eagerly. Tool registrations retain concise descriptions and schemas without duplicate `promptGuidelines`.
 
-Tier B guidance lives in `SHARED_BROWSER_PLAYBOOK_GUIDELINES`, generated README/command-reference fragments, and targeted docs. When a workflow needs examples, caveats, or long command-family coverage, add it there instead of expanding always-on prompt text. If a Tier B rule prevents a repeated real failure, promote only the smallest durable sentence into Tier A and keep the generated-doc mirrors aligned.
+Keep operating rules in the canonical playbook arrays and regenerate their documentation mirrors. Absolute installed-package documentation paths remain available for detailed examples and command inventories; they do not substitute for delivering the full browser guidance.
 
 ### No reusable recipe layer yet
 

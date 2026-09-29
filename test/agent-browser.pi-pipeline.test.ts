@@ -31,9 +31,10 @@ import {
 	type AgentSession,
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import * as Pi from "@earendil-works/pi-coding-agent";
 
 import agentBrowserExtension from "../extensions/agent-browser/index.js";
-import { PROJECT_RULE_PROMPT, RUNTIME_PROMPT_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
+import { PROJECT_RULE_PROMPT, RUNTIME_PROMPT_GUIDELINES, SHARED_BROWSER_PLAYBOOK_GUIDELINES, ADVANCED_TOOL_PROMPT_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	readInvocationLog,
 	withPatchedEnv,
@@ -208,10 +209,14 @@ async function runPipelinePrompt(options: {
 				modelsPath: null,
 			});
 			const model = registerPipelineProvider(modelRuntime, options.toolArguments, options.priorCalls, options.toolName, options.discoveryStream);
+			const instructionGroups: ExtensionFactory[] = [];
+			if (options.discoveryStream && "instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function") {
+				instructionGroups.push(Pi.instructionGroupsExtension as ExtensionFactory);
+			}
 			const resourceLoader = new DefaultResourceLoader({
 				agentDir: tempDir,
 				cwd: tempDir,
-				extensionFactories: options.extensionFactory ? [options.extensionFactory] : [],
+				extensionFactories: options.extensionFactory ? [...instructionGroups, options.extensionFactory] : [],
 				additionalExtensionPaths: options.extensionFactory ? [] : [resolve(".")],
 				noContextFiles: true,
 				noExtensions: true,
@@ -221,7 +226,7 @@ async function runPipelinePrompt(options: {
 			});
 			await resourceLoader.reload();
 			assert.deepEqual(resourceLoader.getExtensions().errors, []);
-			assert.equal(resourceLoader.getExtensions().extensions.length, 1);
+			assert.equal(resourceLoader.getExtensions().extensions.length, 1 + instructionGroups.length);
 			if (!options.extensionFactory) {
 				assert.equal(resourceLoader.getExtensions().extensions[0]?.resolvedPath, resolve("dist/extensions/agent-browser/index.js"));
 			}
@@ -259,6 +264,7 @@ async function runPipelinePrompt(options: {
 
 for (const webSearch of ["absent", "startup", "late"] as const) {
 	test(`Pi pipeline reveals complete browser instructions after discovery on a generic prompt before execution (web search: ${webSearch})`, { skip: process.env.PI_AGENT_BROWSER_NATIVE_DISCOVERY !== "1" }, async () => {
+		assert.ok("instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function", "candidate must export its public instruction groups factory");
 		let hookCalls = 0;
 		let executionCalls = 0;
 		let requests = 0;
@@ -282,8 +288,10 @@ for (const webSearch of ["absent", "startup", "late"] as const) {
 					assert.ok(!prompt.includes(PROJECT_RULE_PROMPT));
 					return createToolCallingStream({ enable: ["browser"] }, [], "discover_tools", "call_discovery_pipeline")(model, context, options);
 				}
-				assert.ok(prompt.includes(PROJECT_RULE_PROMPT), "complete deferred browser section must be visible in this same run");
-				for (const guideline of RUNTIME_PROMPT_GUIDELINES) assert.ok(prompt.includes(guideline), guideline);
+				const instructions = context.messages.filter(message => message.role === "toolResult" && message.toolName === "discover_tools")
+					.flatMap(message => message.role === "toolResult" ? message.content.filter(part => part.type === "text").map(part => part.text) : []).join("\n");
+				assert.ok(instructions.includes(PROJECT_RULE_PROMPT), "complete instructions must reach the model before execution");
+				for (const guideline of [...RUNTIME_PROMPT_GUIDELINES, ...SHARED_BROWSER_PLAYBOOK_GUIDELINES, ...Object.values(ADVANCED_TOOL_PROMPT_GUIDELINES).flat()]) assert.ok(instructions.includes(guideline), guideline);
 				assert.ok(names.includes("agent_browser"));
 				assert.ok(names.includes("agent_browser_code"));
 				assert.ok(names.includes("agent_browser_tools"));
@@ -302,6 +310,39 @@ for (const webSearch of ["absent", "startup", "late"] as const) {
 		assert.deepEqual(pipeline.invocations.map(({ args }) => args), [["--help"]]);
 	});
 }
+
+test("Pi pipeline refuses same-batch browser execution before discovery instructions are read", { skip: process.env.PI_AGENT_BROWSER_NATIVE_DISCOVERY !== "1" }, async () => {
+	assert.ok("instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function", "candidate must export its public instruction groups factory");
+	let requests = 0;
+	let executionCalls = 0;
+	const pipeline = await runPipelinePrompt({
+		toolArguments: { args: ["--help"] },
+		extensionFactory(pi) { agentBrowserExtension(pi, { async beforeExecute() { executionCalls++; } }); },
+		discoveryStream(model, context, options) {
+			requests++;
+			if (requests === 1) {
+				return createToolCallingStream({ args: ["--help"] }, [
+					{ type: "toolCall", id: "samebatch-discover", name: "discover_tools", arguments: { enable: ["browser"] } },
+				])(model, context, options);
+			}
+			const result = context.messages.filter(isAgentBrowserToolResult).find(message => message.toolName === "agent_browser");
+			assert.equal(result?.isError, true);
+			assert.match(JSON.stringify(result), /prior turn/);
+			assert.equal(executionCalls, 0);
+			return streamTextResponse(model, "Stopped after guarded refusal.");
+		},
+		async runPrompt(session) {
+			const before = session.getActiveToolNames().sort();
+			await session.prompt("Discover and try a premature browser call.");
+			assert.deepEqual(session.getActiveToolNames().sort(), before);
+			assert.ok(!before.includes("agent_browser_qa"));
+		},
+		fakeScript: `throw Error("browser must not dispatch before discovery");`,
+	});
+	assert.equal(requests, 2);
+	assert.equal(pipeline.persistedResult.isError, true);
+	assert.deepEqual(pipeline.invocations, []);
+});
 
 test("Pi pipeline captures the owner cwd before an awaited browser policy without moving native ctx", async () => {
 	let selected = "";

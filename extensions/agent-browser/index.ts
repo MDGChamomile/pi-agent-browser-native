@@ -14,6 +14,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { batchHasSuccessfulCloseAll, getSuccessfulBatchCloseLifecycle } from "./lib/batch-lifecycle.js";
 import {
 	PROJECT_RULE_PROMPT,
+	ADVANCED_TOOL_PROMPT_GUIDELINES,
+	QUICK_START_GUIDELINES,
+	SHARED_BROWSER_PLAYBOOK_GUIDELINES,
+	WEB_SEARCH_TOOL_PROMPT_GUIDELINES,
+	WRAPPER_TAB_RECOVERY_BEHAVIOR,
 	buildBrowserDefaultProfileGuideline,
 	buildBrowserExecutablePathGuideline,
 	buildToolPromptGuidelines,
@@ -57,7 +62,7 @@ import {
 	getAgentBrowserVersionValidationError,
 	parseAgentBrowserVersionOutput,
 } from "./lib/upstream-version.js";
-import { buildPromptPolicy, getLatestUserPrompt, shouldAppendBrowserSystemPrompt } from "./lib/prompt-policy.js";
+import { buildPromptPolicy, getLatestUserPrompt } from "./lib/prompt-policy.js";
 import { isCloseAllCommand, isCloseCommand } from "./lib/command-taxonomy.js";
 import { hasLaunchScopedFlagToken } from "./lib/launch-scoped-flags.js";
 import { cleanupSecureTempArtifacts } from "./lib/temp.js";
@@ -86,7 +91,7 @@ import { buildValidationFailureResult, resolveAgentBrowserInput, type AgentBrows
 import { applyAgentBrowserOutputPath, canWriteAgentBrowserOutput, normalizeRequestedOutputPath } from "./lib/orchestration/output-file.js";
 import { appendScriptSessionLease, createBrowserCodeOutput, getScriptSessionLeasesFromBranch } from "./lib/orchestration/script-mode.js";
 import { resolveBrowserExecutionIdentity, withBrowserExecutionLock, withBrowserExecutionLocks } from "./lib/managed-session-policy-lock.js";
-import { AGENT_BROWSER_DISCOVERY_GROUP, registerAgentBrowserToolSurface } from "./lib/tool-surface.js";
+import { AGENT_BROWSER_INSTRUCTION_GROUP, AGENT_BROWSER_TOOL_INVENTORY, registerAgentBrowserToolSurface, type AgentBrowserExecutor, type AgentBrowserCodeExecutor } from "./lib/tool-surface.js";
 import type { AgentBrowserFailureCategory, FileArtifactMetadata, NetworkRouteRecord, SessionArtifactManifest } from "./lib/results/contracts.js";
 import { formatSessionArtifactRetentionSummary, getSessionArtifactManifestEntryKey, isPendingRecordingCommand, isSessionArtifactManifest, mergeSessionArtifactManifest, retirePendingRecordingManifestEntries } from "./lib/results/artifact-manifest.js";
 import { appendUniqueAgentBrowserNextActions, applyNamespaceToNextActions, applySessionToNextActions, buildNextToolAction, type AgentBrowserNextAction } from "./lib/results/next-actions.js";
@@ -946,13 +951,6 @@ export default function agentBrowserExtension(
 		cwd: process.cwd(),
 		includeProjectConfig: false,
 	});
-	const webSearchToolAvailable = canRegisterWebSearchTool(agentBrowserConfig);
-	const toolPromptGuidelines = buildToolPromptGuidelines({
-		browserDefaultProfile: agentBrowserConfig.trustedBrowserDefaultProfile,
-		browserExecutablePath: agentBrowserConfig.trustedBrowserExecutablePath,
-		includeWebSearch: webSearchToolAvailable,
-		docs: getInstalledDocsPaths(),
-	});
 	const implicitSessionIdleTimeoutMs = String(getImplicitSessionIdleTimeoutMs());
 	const implicitSessionCloseTimeoutMs = getImplicitSessionCloseTimeoutMs();
 	let webSearchToolRegistered = false;
@@ -1347,7 +1345,6 @@ export default function agentBrowserExtension(
 	const registerWebSearchToolIfAvailable = (configState: typeof agentBrowserConfig) => {
 		if (webSearchToolRegistered || !canRegisterWebSearchTool(configState)) return;
 		pi.registerTool({
-			...{ discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "entry" as const } },
 			...createAgentBrowserWebSearchTool(configState, {
 				loadConfigState(ctx) {
 					return loadAgentBrowserConfigSync({
@@ -1520,11 +1517,7 @@ export default function agentBrowserExtension(
 		await cleanupSecureTempArtifacts({ preservePaths: preservedElectronProfileDirs });
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
-		const sectionTools = (event.systemPromptOptions as typeof event.systemPromptOptions & { sectionTools?: object })?.sectionTools;
-		if (!Object.hasOwn(sectionTools ?? {}, "agent_browser") && !shouldAppendBrowserSystemPrompt(event.prompt)) {
-			return undefined;
-		}
+	const fullInstructions = (ctx: ExtensionContext): string => {
 		const runtimeConfig = loadAgentBrowserConfigSync({
 			cwd: ctx.cwd,
 			includeProjectConfig: shouldIncludeProjectConfig(ctx),
@@ -1540,7 +1533,37 @@ export default function agentBrowserExtension(
 		const runtimeConfigPrompt = browserGuidance.length > 0
 			? `\n\nProject agent_browser config guidance:\n${browserGuidance.map((line) => `- ${line}`).join("\n")}`
 			: "";
-		event.systemPromptOptions.sections.agent_browser = `${PROJECT_RULE_PROMPT}${runtimeConfigPrompt}`;
+		const guidelines = [
+			...buildToolPromptGuidelines({
+				browserDefaultProfile: runtimeConfig.trustedBrowserDefaultProfile,
+				browserExecutablePath: runtimeConfig.trustedBrowserExecutablePath,
+				includeWebSearch: webSearchToolRegistered,
+				docs: getInstalledDocsPaths(),
+			}),
+			...QUICK_START_GUIDELINES,
+			...SHARED_BROWSER_PLAYBOOK_GUIDELINES,
+			...WRAPPER_TAB_RECOVERY_BEHAVIOR,
+			...Object.values(ADVANCED_TOOL_PROMPT_GUIDELINES).flat(),
+			...(webSearchToolRegistered ? WEB_SEARCH_TOOL_PROMPT_GUIDELINES : []),
+		];
+		return `${PROJECT_RULE_PROMPT}\n\n${[...new Set(guidelines)].map(line => `- ${line}`).join("\n")}${runtimeConfigPrompt}`;
+	};
+	let isInstructionsManaged = () => false;
+	pi.events.on("pi:instruction-groups", (data) => {
+		const collector = data as {
+			register(group: { name: string; description: string; tools: string[]; instructions: (ctx: ExtensionContext) => string }): void;
+			isManaged(): boolean;
+		};
+		collector.register({
+			...AGENT_BROWSER_INSTRUCTION_GROUP,
+			tools: ["agent_browser", "agent_browser_code", "agent_browser_tools", "agent_browser_web_search",
+				...Object.values(AGENT_BROWSER_TOOL_INVENTORY).map(({ name }) => name)],
+			instructions: fullInstructions,
+		});
+		isInstructionsManaged = collector.isManaged;
+	});
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (!isInstructionsManaged()) event.systemPromptOptions.sections.agent_browser = fullInstructions(ctx);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -1575,7 +1598,7 @@ export default function agentBrowserExtension(
 			component.setState(formatAgentBrowserRenderResult(result, options, theme, context.isError), options.expanded, theme);
 			return component;
 		},
-		async execute(toolCallId, params: AgentBrowserExecuteParams, signal, onUpdate, ctx, nativeToolCallId: string = toolCallId, capturedCwd?: string, modelVisible = true) {
+		async execute(toolCallId, params: AgentBrowserExecuteParams, signal, onUpdate, ctx: Parameters<AgentBrowserExecutor>[4], nativeToolCallId: string = toolCallId, capturedCwd?: string, modelVisible = true) {
 			let operationCwd: string;
 			try { operationCwd = capturedCwd ?? resolveExecutionCwd(pi, ctx); }
 			catch (error) {
@@ -1992,7 +2015,7 @@ export default function agentBrowserExtension(
 			return managedSessionExecutionQueue.run(executeAdmitted, signal);
 		},
 	} satisfies Pick<ToolDefinition<typeof AGENT_BROWSER_PARAMS>, "execute" | "renderCall" | "renderResult">;
-	const executeCode = async (toolCallId: string, params: AgentBrowserCodeParams, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext): Promise<AgentBrowserToolResult> => {
+	const executeCode = async (toolCallId: string, params: AgentBrowserCodeParams, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: Parameters<AgentBrowserCodeExecutor>[4]): Promise<AgentBrowserToolResult> => {
 		if (!ctx.sessionManager.getSessionFile()) return browserExecutionFailure(new Error("agent_browser_code requires a persisted Pi session for ordered browser-state recovery; relaunch without --no-session."), signal, "validation-error");
 		let operationCwd: string;
 		try { operationCwd = resolveExecutionCwd(pi, ctx); }
@@ -2111,7 +2134,6 @@ export default function agentBrowserExtension(
 			return finalizeObservation(result, params, ctx);
 		},
 		executionMode: beforeExecute ? "sequential" : undefined,
-		promptGuidelines: toolPromptGuidelines,
 		renderCall: agentBrowserTool.renderCall, renderResult: agentBrowserTool.renderResult,
 	});
 

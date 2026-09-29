@@ -45,7 +45,7 @@ The agent gets a native tool, not a bash workaround:
 { "args": ["find", "text", "Learn React", "click"] }
 ```
 
-Use native commands for individual actions, `batch --bail` for fixed sequences, and `agent_browser_code` for loops or branches. Specialized tools are available through `agent_browser_tools`; see [common calls](#common-agent-calls). On hosts supporting extension-owned discovery, enable the `browser` group through `discover_tools` first. The extension supplies its own membership and instructions; no user-maintained tool inventory is needed. Official Pi keeps the ordinary direct/code/loader surface.
+Use native commands for individual actions, `batch --bail` for fixed sequences, and `agent_browser_code` for loops or branches. Specialized tools are available through `agent_browser_tools`; see [common calls](#common-agent-calls). On hosts supporting instruction groups, enable `browser` through `discover_tools` first to receive the complete browser guidance and reveal selected declarations. This does not grant callable permissions or activate advanced tools. The extension owns group membership and one full instruction source; official Pi receives that same guidance eagerly and keeps the ordinary direct/code/loader surface.
 
 The result is optimized for agent work:
 
@@ -147,7 +147,7 @@ The `which` package and launcher symlink satisfy upstream's existing Linux syste
 
 Reapply the musl command symlink after reinstalling or upgrading upstream until #1587 is resolved. The wrapper uses Termux-private socket/policy storage, compact 80-bit managed identities so ordinary namespaces and fresh rotations fit the Unix socket-path limit, Termux's `ps`, and Android app-sandbox trust rules automatically. Historical 0.6 Android validation covered headless browser flows, managed restore, namespaced sessions, the former script/job inputs, QA, screenshots, and recording; it does not qualify the 0.7 code contract. Electron desktop discovery/lifecycle is not applicable to Android apps. Android remains outside the release-blocking Crabbox macOS/Ubuntu/native-Windows matrix until a repeatable Android provider target is added.
 
-The native tool also gives agents absolute installed-package doc paths in its compact runtime guidance. Raw `args` are the 1:1 upstream CLI coverage path for the targeted `agent-browser` release; `agent_browser_code` adds bounded JavaScript orchestration over the same browser, while advanced tools preserve semantic actions, diagnostic QA, source lookup, and Electron lifecycle. Agents should read `README.md` for setup/dependencies, `docs/COMMAND_REFERENCE.md` for targeted command workflows, and `docs/TOOL_CONTRACT.md` for result/detail contracts only when deeper guidance is needed.
+The native tool also gives agents absolute installed-package doc paths in its full browser instructions. Raw `args` are the 1:1 upstream CLI coverage path for the targeted `agent-browser` release; `agent_browser_code` adds bounded JavaScript orchestration over the same browser, while advanced tools preserve semantic actions, diagnostic QA, source lookup, and Electron lifecycle. Agents should read `README.md` for setup/dependencies, `docs/COMMAND_REFERENCE.md` for targeted command workflows, and `docs/TOOL_CONTRACT.md` for result/detail contracts only when deeper guidance is needed.
 
 Then install this Pi package:
 
@@ -705,7 +705,7 @@ npm run verify -- release
 3. Tool calls are translated into upstream `agent-browser` CLI invocations with controlled args, stdin, environment, timeout, and session planning.
 4. Upstream JSON/plain-text output is parsed into model-friendly content and structured details.
 5. Screenshots, downloads, recordings, traces, profiles, and spill files are normalized as Pi-visible artifacts where possible.
-6. Generated playbook text in docs and tool metadata stays aligned with `extensions/agent-browser/lib/playbook.ts`.
+6. Generated playbook text in docs and browser instructions stays aligned with `extensions/agent-browser/lib/playbook.ts`.
 
 The upstream browser engine remains [`agent-browser`](https://agent-browser.dev/). This package does not bundle it. The recommended baseline is 0.38.1 and the stable runtime floor is 0.35.0; newer stable versions are accepted without version-specific compatibility shims.
 

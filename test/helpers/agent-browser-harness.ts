@@ -496,7 +496,7 @@ export function createExtensionHarness(options: {
 		},
 		getCommands: () => [],
 		getActiveTools() { return [...activeTools]; },
-		getAllTools() { return [...registeredTools.values()].map(tool => ({ ...tool, id: tool.name, sourceInfo: { path: "test", source: "test", scope: "temporary" as const, origin: "top-level" as const } })); },
+		getAllTools() { return [...registeredTools.values()].map(tool => ({ ...tool, id: tool.name, exposure: "direct" as const, sourceInfo: { path: "test", source: "test", scope: "temporary" as const, origin: "top-level" as const } })); },
 		setActiveTools(names) { activeTools = [...names]; },
 		appendEntry(customType, data) {
 			appendedEntries.push({ customType, data });
@@ -538,6 +538,7 @@ export function createExtensionHarness(options: {
 	return {
 		appendedEntries,
 		ctx,
+		events: pi.events,
 		getTool(name: string) {
 			return registeredTools.get(name);
 		},
@@ -559,6 +560,12 @@ export async function runExtensionEvent(
 	for (const handler of handlers.get(eventName) ?? []) {
 		await handler(...args);
 	}
+}
+
+export async function getBrowserInstructions(harness: ReturnType<typeof createExtensionHarness>): Promise<string> {
+	const event = { prompt: "Please continue.", systemPromptOptions: { sections: {} as Record<string, string> } };
+	await runExtensionEvent(harness.handlers, "before_agent_start", event, harness.ctx);
+	return event.systemPromptOptions.sections.agent_browser ?? "";
 }
 
 export async function runExtensionEventResults<T>(

@@ -18,7 +18,7 @@ export const QUICK_START_GUIDELINES = [
 	"Use { args: [\"batch\", \"--bail\"], stdin: \"[[\\\"fill\\\",\\\"@e1\\\",\\\"text\\\"],[\\\"click\\\",\\\"@e2\\\"]]\" } for same-snapshot form fields followed by submit. Split if a fill rerenders later fields. Add native condition waits after navigation-prone actions; a click alone does not prove the destination loaded. Avoid blind mutation retries after timeout.",
 	"agent_browser_code takes { code, session?, namespace?, timeoutMs?, outputPath? }. JavaScript globals are fresh for every call; the selected browser persists and is shared with agent_browser. Use await browser({ args, stdin?, timeoutMs? }), inspect result.success, and emit selected JSON instead of whole envelopes. Use emitImage(result.imageObservations[0]) only when image inspection is needed; image handles belong to the current code call. No imports or host filesystem/network/process APIs are exposed.",
 	"Example agent_browser_code: { code: 'const result = await browser({args:[\"get\",\"title\"]}); if (!result.success) { emit(result); } else { emit({title:result.data}); }' }. Native batch still avoids extra CLI processes for fixed segments inside code. Explicit session/namespace controls select the browser for this cell without changing the default browser.",
-	"Call agent_browser_tools with no fields for inventory, or { enable: [\"action\", \"qa\", \"electron\", \"source\", \"network\"] } for advanced native tools. It adds agent_browser_action, agent_browser_qa, agent_browser_electron, agent_browser_source, and agent_browser_network_source without disabling other tools. Their specialized instructions appear when activated.",
+	"Call agent_browser_tools with no fields for inventory, or { enable: [\"action\", \"qa\", \"electron\", \"source\", \"network\"] } for advanced native tools. It adds agent_browser_action, agent_browser_qa, agent_browser_electron, agent_browser_source, and agent_browser_network_source without disabling other tools. The browser instructions cover these capabilities; activation reveals their selected tool declarations.",
 	"Use read <url> for readable web text; get title/url, get text/html/value/count <selector>, or get attr <selector> <name> for targeted state. For eval --stdin, put JavaScript in stdin and return the desired value. outputPath saves result data and must differ from screenshot/download/recording paths. Use --json only when JSON text is needed.",
 	"For artifacts, verify artifactVerification and artifacts before reporting success. A pending recording is not verified output; install ffmpeg before starting and pair start with stop. Native download owns the click and saves Blob/redirect downloads. Close keeps explicitly saved files. Save promptGuard-required paths before close. Screenshot pixels are not browser CSS coordinates: use imageObservations geometry (dimensions, viewport, crop/origin, scroll and DPR) before any visual-coordinate action; full-page and element captures are not current-viewport coordinates, and Pi resizing only maps sent pixels to original image pixels.",
 	"Follow model-visible nextActions when present, including identity and stdin, instead of guessing commands. Treat native pending confirmations and unknown mutation outcomes as inspection boundaries. For dense snapshots, inspect Omitted high-value controls before reading a full spill.",
@@ -48,6 +48,13 @@ export const ADVANCED_TOOL_PROMPT_GUIDELINES = {
 export const WEB_SEARCH_PROMPT_GUIDELINE =
 	"Prefer agent_browser_web_search for current or external web facts and URL discovery over public search-engine forms that can hit anti-bot/CAPTCHA-gated pages. For research before implementation, pass searchType: deep-lite unless webSearch.defaultSearchType already does; omit it for everyday lookups so config/auto wins. Provider rank is not proof of authority: when correctness or version matters, prefer the vendor or project's primary current docs, inspect page-date and version clues, and constrain one follow-up after discovering the official domain (Exa includeDomains; Brave site: in query). Do not count URL aliases as independent sources. Use agent_browser after you have a target URL that needs interaction, screenshots, or DOM inspection.";
 
+export const WEB_SEARCH_TOOL_PROMPT_GUIDELINES = [
+	WEB_SEARCH_PROMPT_GUIDELINE,
+	"agent_browser_web_search chooses Exa or Brave from configured keys; when both are available, Exa is preferred by default unless webSearch.preferredProvider says otherwise. Use provider only when the user/config calls for a specific provider.",
+	"Use Exa deep only when deep-lite may miss angles, and deep-reasoning only for exhaustive or still-thin research. Do not run parallel agent_browser_web_search calls; make one high-signal query, inspect its results, then at most one follow-up.",
+	"If agent_browser_web_search returns HTTP 429, stop searching and tell the user the API plan/rate limit needs time or a plan change.",
+	"After using agent_browser_web_search, cite result URLs in the final answer when web evidence informed the answer.",
+] as const;
 
 export const SHARED_BROWSER_PLAYBOOK_GUIDELINES = [
 	QUICK_START_GUIDELINES[0],
@@ -111,7 +118,7 @@ export const WRAPPER_TAB_RECOVERY_BEHAVIOR = [
 	"If upstream reports tab_gone, the pinned bound tab is gone; use details.nextActions (tab list / tab new) instead of assuming another tab is yours.",
 ] as const;
 
-/** Tier A: always-on tool promptGuidelines (keep small; Tier B lives in SHARED_BROWSER_PLAYBOOK_GUIDELINES and docs). */
+/** Concise orientation included alongside the full operating playbook. */
 export const RUNTIME_PROMPT_GUIDELINES = [
 	"Use agent_browser for one native command; batch --bail with JSON-array stdin for fixed sequences; agent_browser_code for loops/branches/aggregation. Return to the model at judgment boundaries. Use agent_browser_tools to discover/enable action, qa, electron, source, or network tools.",
 	"agent_browser_code runs fresh JavaScript against the persistent browser: await browser({args, stdin?, timeoutMs?}), check result.success, emit(selected JSON), or emitImage(result.imageObservations[0]). No host APIs/imports; globals do not persist. Explicit session/namespace selects this cell's browser without changing the default.",
