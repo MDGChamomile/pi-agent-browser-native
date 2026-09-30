@@ -205,7 +205,7 @@ export async function readBrowserEntries(manager: ReadonlySessionManager, physic
 		const metadata = await scanJournalMetadata(file, captured.size);
 		const header = metadata.find(entry => entry.value.type === "session");
 		if (header?.value.id !== (manager.getHeader()?.id ?? manager.getSessionId())) throw new Error("Pi session journal identity does not match the active session.");
-		const publicManager = manager as ReadonlySessionManager & {
+		const publicManager = manager as Omit<ReadonlySessionManager, "getEntryMetadata" | "iterateEntryMetadata"> & {
 			getEntryMetadata?: (id: string) => unknown;
 			iterateEntryMetadata?: (options?: { branchFrom?: string | null }) => Iterable<{ id: string; parentId: string | null }>;
 		};
