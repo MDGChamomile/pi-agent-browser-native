@@ -1690,7 +1690,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal(reservedQuickPdf.isError, true);
 			assert.match(reservedQuickPdf.content[0]?.text ?? "", /demo\.webm is reserved by an active recording/);
 			const noiseManifest = noise.details?.artifactManifest as { entries?: Array<{ subcommand?: string }> } | undefined;
-			assert.equal(noiseManifest?.entries?.some((entry) => entry.subcommand === "start"), false);
+			assert.equal((noiseManifest?.entries ?? []).some((entry) => entry.subcommand === "start"), false);
 			const reservedOutputPath = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "title"], outputPath: "demo.webm" });
 			assert.equal(reservedOutputPath.isError, true);
 			assert.match(reservedOutputPath.content[0]?.text ?? "", /Unsupported outputPath: demo\.webm is reserved by an active recording/);
@@ -1764,7 +1764,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal(closed.isError, false);
 			if (process.platform !== "win32") await rm(join(tempDir, "demo.webm"), { force: true });
 			const closedManifest = closed.details?.artifactManifest as { entries?: Array<{ subcommand?: string }> } | undefined;
-			assert.equal(closedManifest?.entries?.some((entry) => entry.subcommand === "start" || entry.subcommand === "restart"), false);
+			assert.equal((closedManifest?.entries ?? []).some((entry) => entry.subcommand === "start" || entry.subcommand === "restart"), false);
 
 			const batchRecording = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["record", "start", "batch-close.webm"] });
 			assert.equal(batchRecording.isError, false);
@@ -1812,10 +1812,11 @@ if (firstCallFailure) process.exit(1);`,
 			});
 			assert.equal(combinedStartClose.isError, true, combinedStartClose.content[0]?.text);
 			assert.equal(combinedStartClose.details?.failureCategory, "artifact-missing");
+			const combinedCloseBranch = harness.ctx.sessionManager.getBranch().slice();
 			const releasedAfterCombinedStartClose = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["pdf", "batch-start-close.webm"] });
 			assert.doesNotMatch(releasedAfterCombinedStartClose.content[0]?.text ?? "", /reserved by an active recording/);
 			const combinedManifest = combinedStartClose.details?.artifactManifest as { entries?: Array<{ path?: string; subcommand?: string }> } | undefined;
-			assert.equal(combinedManifest?.entries?.some((entry) => entry.path === "batch-start-close.webm" && entry.subcommand === "start"), false);
+			assert.equal((combinedManifest?.entries ?? []).some((entry) => entry.path === "batch-start-close.webm" && entry.subcommand === "start"), false);
 			const combinedArtifacts = combinedStartClose.details?.artifacts as Array<{ path?: string; recordingState?: string; status?: string; subcommand?: string; willExistOnStop?: boolean }> | undefined;
 			assert.deepEqual(combinedArtifacts?.map((artifact) => ({ path: artifact.path, recordingState: artifact.recordingState, status: artifact.status, subcommand: artifact.subcommand, willExistOnStop: artifact.willExistOnStop })), [{ path: "batch-start-close.webm", recordingState: undefined, status: "missing", subcommand: "close-abandoned", willExistOnStop: undefined }]);
 			const combinedVerification = combinedStartClose.details?.artifactVerification as { missingCount?: number; pendingCount?: number } | undefined;
@@ -1825,7 +1826,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal((combinedStartClose.details?.managedSessionOutcome as { activeAfter?: boolean; status?: string } | undefined)?.activeAfter, false);
 			assert.equal((combinedStartClose.details?.managedSessionOutcome as { activeAfter?: boolean; status?: string } | undefined)?.status, "closed");
 			const replayHarness = createExtensionHarness({
-				branch: [activeBeforeCombined, combinedStartClose].map((result) => ({ type: "message", message: { details: result.details, isError: result.isError, toolName: "agent_browser" } })),
+				branch: combinedCloseBranch,
 				cwd: tempDir,
 			});
 			await runExtensionEvent(replayHarness.handlers, "session_start", { reason: "resume" }, replayHarness.ctx);

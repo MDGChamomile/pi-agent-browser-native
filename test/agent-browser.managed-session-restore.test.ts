@@ -11,6 +11,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { convertBrowserEntries } from "../extensions/agent-browser/lib/browser-session-conversion.js";
 
 import {
 	agentBrowserConfigBlocksManagedRestore,
@@ -1369,7 +1370,7 @@ test("restoreManagedSessionStateFromBranch resets sibling state and reapplies br
 	markManagedSessionRestoreDisabled("sibling-session");
 	const managed = "piab-project-abc12345-deadbeef";
 	const restoredState = restoreManagedSessionStateFromBranch(
-		[
+		convertBrowserEntries([
 			{
 				type: "message",
 				message: {
@@ -1383,7 +1384,7 @@ test("restoreManagedSessionStateFromBranch resets sibling state and reapplies br
 					},
 				},
 			},
-		],
+		]),
 		managed,
 	);
 	managedSessionRestoreState.replace(restoredState.managedSessionRestoreDisabledIdentities);

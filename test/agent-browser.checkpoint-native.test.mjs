@@ -70,7 +70,8 @@ test("native idle checkpoint, active controls, and stable root restore", { skip:
  ({ session } = await sdk.createAgentSession({ cwd, agentDir, modelRuntime, resourceLoader: loader, settingsManager, sessionManager: sm, noTools: "builtin" }));
  await session.bindExtensions({ onError: e => { throw new Error(e.error); } });
  // Materialize the synthetic native journal without invoking a provider.
- sm.appendMessage({ role: "assistant", content: [{ type: "text", text: "Synthetic checkpoint fixture." }], api: "openai-completions", provider: "fixture", model: "fixture", stopReason: "stop", timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+ const publishFixture = () => sm.appendMessage({ role: "assistant", content: [{ type: "text", text: "Synthetic checkpoint fixture." }], api: "openai-completions", provider: "fixture", model: "fixture", stopReason: "stop", timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+ publishFixture();
  const receipts = [];
  const call = async params => { await session.prompt(`/checkpoint-browser-test ${JSON.stringify(params)}`); return result; };
  const ok = async params => {
@@ -244,8 +245,8 @@ test("native idle checkpoint, active controls, and stable root restore", { skip:
    await ok({ args: ["close"] });
    await checkpoint("managed browser explicitly closed", true);
   });
-  await t.test("active recording and failed real journal append cannot qualify", async () => {
-   await ok({ args: ["open", url] });
+  await t.test("active recording and failed operation begin cannot qualify", async () => {
+   const opened = await ok({ args: ["open", url] });
    await ok({ args: ["record", "start", join(root, "record.webm")] });
    await checkpoint("recording", false, /recording is pending/);
    await delay(12_000);
@@ -253,14 +254,11 @@ test("native idle checkpoint, active controls, and stable root restore", { skip:
    beforeResult = () => chmod(sm.getSessionFile(), 0o600);
    const stopped = await call({ args: ["record", "stop"] });
    beforeResult = undefined;
-   assert.ok(stopped.details.recordingPersistenceWarning, "failed append must retain dirty state");
-   await chmod(sm.getSessionFile(), 0o400);
-   const beforeRetry = await readFile(sm.getSessionFile());
-   await assert.rejects(session.acquireCheckpoint({ signal: AbortSignal.timeout(10_000), quiesce: () => () => {} }), { code: "EACCES" });
-   assert.equal(session.isCheckpointHeld, false);
-   assert.deepEqual(await readFile(sm.getSessionFile()), beforeRetry);
-   receipts.push({ label: "failed recording journal retry", acquisition: "EACCES", priorBytesPreserved: true });
-   await chmod(sm.getSessionFile(), 0o600);
+   assert.equal(stopped.isError, true);
+   assert.equal(stopped.details.browserStatePersistence, "begin-unconfirmed", "an unwritable begin must prevent native record stop");
+   await checkpoint("failed stop leaves recording pending", false, /recording is pending/);
+   const recorded = await ok({ args: ["--session", opened.details.sessionName, "record", "stop"] });
+   assert.ok(recorded.details.data.frames > 0, "the failed begin cannot have stopped native recording");
    await checkpoint("journal repaired but browser live", false, /daemon/);
    await ok({ args: ["close"] });
    const repaired = await checkpoint("recording retired after native journal repair", true);
@@ -270,7 +268,7 @@ test("native idle checkpoint, active controls, and stable root restore", { skip:
    callController = new AbortController();
    const before = sm.getEntries().length;
    const running = call({ code: 'await browser({args:["open","about:blank"]}); await new Promise(() => {});', timeoutMs: 30_000 });
-   await waitFor(() => sm.getEntries().slice(before).some(entry => entry.type === "custom" && entry.customType === "agent-browser-transition" && entry.data?.isError === false));
+   await waitFor(() => sm.getEntries().slice(before).some(entry => entry.type === "custom" && entry.customType === "agent-browser-transition" && entry.data?.event?.phase === "finish" && entry.data.event.isError === false));
    await assert.rejects(session.acquireCheckpoint({ signal: AbortSignal.timeout(200), quiesce: () => () => {} }), /cancel/i);
    receipts.push({ label: "active code/native command", acquisition: "waited then cancelled" });
    callController.abort(); await running; callController = undefined;
@@ -290,6 +288,7 @@ test("native idle checkpoint, active controls, and stable root restore", { skip:
    sm = sdk.SessionManager.create(cwd, join(root, "restore-sessions"));
    ({ session } = await sdk.createAgentSession({ cwd, agentDir, modelRuntime, resourceLoader: loader, settingsManager, sessionManager: sm, noTools: "builtin" }));
    await session.bindExtensions({ onError: e => { throw new Error(e.error); } });
+   publishFixture();
    const opened = await ok({ args: ["open", url] });
    rootName = opened.details.sessionName;
    assert.match(rootName, /^pi-root-/);

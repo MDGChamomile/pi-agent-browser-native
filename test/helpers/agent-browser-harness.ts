@@ -3,16 +3,19 @@
  * Responsibilities: Build fake pi extension contexts, run registered extension events/tools, patch process env safely, create fake agent-browser binaries, read invocation logs, and manage child-process fixtures.
  * Scope: Test-only utilities for `test/agent-browser.*.test.ts`; production code must not import this module.
  * Usage: Import focused helpers from `./helpers/agent-browser-harness.js` inside Node test-runner suites.
- * Invariants/Assumptions: Helpers preserve caller-owned cleanup responsibilities and restore patched environment variables after each run. `writeFakeAgentBrowserBinary` installs a Unix shell-script launcher or a Windows `agent-browser.cmd`; fake daemons report inactive `session info` by default, and stateful daemon tests set `PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO=1`; pass `platform: "win32"` to assert Windows launcher layout from non-Windows hosts (spawn/PATHEXT behavior still needs a real Windows runner).
+ * Invariants/Assumptions: Helpers preserve caller-owned cleanup responsibilities and restore patched environment variables after each run. `writeFakeAgentBrowserBinary` installs a Unix shell-script launcher or a Windows `agent-browser.cmd`; its default virtual daemon retains launch/close and process-generation metadata. Stateful daemon tests set `PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO=1`; pass `platform: "win32"` to assert Windows launcher layout from non-Windows hosts (spawn/PATHEXT behavior still needs a real Windows runner).
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter, once } from "node:events";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execPath as nodeExecPath, platform as processPlatform } from "node:process";
 
@@ -27,11 +30,14 @@ import type { Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 
 import agentBrowserExtension from "../../extensions/agent-browser/index.js";
+import { convertBrowserEntries } from "../../extensions/agent-browser/lib/browser-session-conversion.js";
 import { TARGET_AGENT_BROWSER_VERSION_LABEL } from "../../scripts/agent-browser-target.mjs";
 
 export const TEST_SESSION_ID = "12345678-1234-5678-9abc-def012345678";
 export const DOWNLOAD_FIXTURE_CONTENT = "download contract fixture report\n";
 export const DOWNLOAD_FIXTURE_FILENAME = "pi-agent-browser-wait-download-contract.txt";
+const journalFixtures = mkdtempSync(join(tmpdir(), "piab-journal-fixtures-"));
+process.once("exit", () => rmSync(journalFixtures, { recursive: true, force: true }));
 
 export interface FixtureServer {
 	baseUrl: string;
@@ -480,7 +486,7 @@ export function createExtensionHarness(options: {
 	projectTrusted?: boolean;
 	prompt?: string;
 	sessionDir?: string;
-	sessionFile?: string;
+	sessionFile?: string | null;
 	sessionId?: string;
 }) {
 	const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
@@ -488,6 +494,38 @@ export function createExtensionHarness(options: {
 	let activeTools: string[] = ["read", "bash"];
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
 	const events = new EventEmitter();
+	const sessionId = options.sessionId ?? TEST_SESSION_ID;
+	const sessionFile = options.sessionFile === null ? undefined : options.sessionFile ?? join(journalFixtures, `${randomUUID()}.jsonl`);
+	const header = { type: "session", version: 3, id: sessionId, cwd: options.cwd, timestamp: new Date().toISOString() };
+	const normalizeBranch = (entries: unknown[]) => {
+		let parentId: string | null = null;
+		const normalized = convertBrowserEntries(entries.map(value => {
+			if (typeof value !== "object" || value === null) return value;
+			const entry = { ...value, id: "id" in value && typeof value.id === "string" ? value.id : randomUUID(),
+				parentId: "parentId" in value ? value.parentId : parentId, timestamp: "timestamp" in value ? value.timestamp : new Date().toISOString() };
+			parentId = entry.id;
+			return entry;
+		}), sessionId);
+		entries.length = 0;
+		for (const entry of normalized) entries.push(entry);
+		return entries;
+	};
+	let branch = normalizeBranch(options.branch ?? buildUserBranch(options.prompt));
+	const entries = [...branch];
+	if (sessionFile) {
+		mkdirSync(dirname(sessionFile), { recursive: true });
+		writeFileSync(sessionFile, [header, ...entries].map(entry => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+	}
+	const syncFixtureEntries = () => {
+		const ids = new Set(entries.map(entry => (entry as { id?: string }).id));
+		if (!branch.some(entry => !ids.has((entry as { id?: string }).id))) return;
+		normalizeBranch(branch);
+		for (const entry of branch) if (!ids.has((entry as { id: string }).id)) {
+			ids.add((entry as { id: string }).id);
+			entries.push(entry);
+			if (sessionFile) appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`);
+		}
+	};
 
 	const pi: Pick<Parameters<typeof agentBrowserExtension>[0], "events" | "appendEntry" | "getActiveTools" | "getAllTools" | "getCommands" | "on" | "registerTool" | "setActiveTools"> = {
 		events: {
@@ -499,9 +537,13 @@ export function createExtensionHarness(options: {
 		getAllTools() { return [...registeredTools.values()].map(tool => ({ ...tool, id: tool.name, exposure: "direct" as const, sourceInfo: { path: "test", source: "test", scope: "temporary" as const, origin: "top-level" as const } })); },
 		setActiveTools(names) { activeTools = [...names]; },
 		appendEntry(customType, data) {
+			syncFixtureEntries();
 			appendedEntries.push({ customType, data });
-			branch.push({ type: "custom", customType, data });
+			const entry = { type: "custom", customType, data, id: randomUUID(), parentId: (branch.at(-1) as { id?: string } | undefined)?.id ?? null, timestamp: new Date().toISOString() };
+			branch.push(entry);
+			entries.push(entry);
 			options.onAppendEntry?.(customType, data);
+			if (sessionFile) appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`);
 		},
 		on(event, handler) {
 			const existingHandlers = handlers.get(event) ?? [];
@@ -520,18 +562,20 @@ export function createExtensionHarness(options: {
 	const registeredTool = registeredTools.get("agent_browser");
 	assert.ok(registeredTool, "expected the extension to register the agent_browser tool");
 
-	let branch = options.branch ?? buildUserBranch(options.prompt);
 	const sessionDir = options.sessionDir ?? (options.sessionFile ? dirname(options.sessionFile) : undefined);
 	const ctx = {
 		cwd: options.cwd,
 		isProjectTrusted: () => options.projectTrusted ?? true,
 		sessionManager: {
-			getBranch: () => branch,
-			getEntries: () => branch,
+			getBranch: () => { syncFixtureEntries(); return branch; },
+			getEntries: () => { syncFixtureEntries(); return entries; },
+			getEntry: (id: string) => { syncFixtureEntries(); return entries.find(entry => typeof entry === "object" && entry !== null && "id" in entry && entry.id === id); },
+			getHeader: () => header,
+			getLeafId: () => { syncFixtureEntries(); return (branch.at(-1) as { id?: string } | undefined)?.id ?? null; },
 			buildSessionProjection: () => ({ messages: branch.flatMap(entry => typeof entry === "object" && entry !== null && "type" in entry && entry.type === "message" && "message" in entry ? [entry.message] : []) }),
 			getSessionDir: () => sessionDir,
-			getSessionFile: () => options.sessionFile,
-			getSessionId: () => options.sessionId ?? TEST_SESSION_ID,
+			getSessionFile: () => sessionFile,
+			getSessionId: () => sessionId,
 		},
 	} as const;
 
@@ -546,7 +590,8 @@ export function createExtensionHarness(options: {
 		handlers,
 		tools: registeredTools,
 		setBranch(nextBranch: unknown[]) {
-			branch = nextBranch;
+			branch = normalizeBranch(nextBranch);
+			syncFixtureEntries();
 		},
 		tool: registeredTool,
 	};
@@ -668,6 +713,28 @@ export async function writeFakeAgentBrowserBinary(
   if (fileAccessIndex >= 0 && process.argv[fileAccessIndex + 1] === "false") process.argv.splice(fileAccessIndex, 2);
 }
 const __piabFakeArgs = process.argv.slice(2);
+const __piabFs = require("node:fs");
+const __piabRuntimeRoot = ${JSON.stringify(tempDir)};
+const __piabSession = __piabFakeArgs.includes("--session") ? __piabFakeArgs[__piabFakeArgs.indexOf("--session")+1] : process.env.AGENT_BROWSER_SESSION || "default";
+const __piabNamespace = (__piabFakeArgs.includes("--namespace") ? __piabFakeArgs[__piabFakeArgs.indexOf("--namespace")+1] : process.env.AGENT_BROWSER_NAMESPACE || "").toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const __piabKey = require('node:crypto').createHash('sha256').update(JSON.stringify([__piabNamespace, __piabSession])).digest('hex');
+const __piabRuntimePath = require('node:path').join(__piabRuntimeRoot, 'fake-daemon-' + __piabKey + '.json');
+let __piabRuntime; try { __piabRuntime = JSON.parse(__piabFs.readFileSync(__piabRuntimePath, "utf8")); } catch {}
+const __piabWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk, ...rest) => {
+  try {
+    const reply = JSON.parse(String(chunk));
+    const info = __piabFakeArgs.includes("session") && __piabFakeArgs.includes("info");
+    if (!info && reply.success === true && __piabFakeArgs.some(arg => ["open","get","snapshot","eval","click","fill","batch","screenshot","record","connect","close","quit","exit"].includes(arg))) {
+      const closed = __piabFakeArgs.some(arg => ["close","quit","exit"].includes(arg)) && !__piabFakeArgs.includes("batch");
+      __piabRuntime = closed ? { active: false, runtime: null } : { active: true, runtime: {
+        restoreKey: process.env.AGENT_BROWSER_RESTORE || null, backgroundPid: process.ppid, socketDir: "test-fixture-runtime", browserLaunched: true
+      }};
+      __piabFs.writeFileSync(__piabRuntimePath, JSON.stringify(__piabRuntime), { mode: 0o600 });
+    }
+  } catch {}
+  return __piabWrite(chunk, ...rest);
+};
 if (process.env.PI_AGENT_BROWSER_TEST_CUSTOM_VERSION !== "1" && __piabFakeArgs.includes("--version")) {
   process.stdout.write(${JSON.stringify(`${TARGET_AGENT_BROWSER_VERSION_LABEL}\n`)});
   process.exit(0);
@@ -677,7 +744,7 @@ if (process.env.PI_AGENT_BROWSER_TEST_PAGE_URL && __piabFakeArgs.at(-2) === "get
   process.exit(0);
 }
 if (process.env.PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO !== "1" && __piabFakeArgs.includes("session") && __piabFakeArgs.includes("info")) {
-  process.stdout.write(JSON.stringify({ success: true, data: { active: false, runtime: null } }));
+  process.stdout.write(JSON.stringify({ success: true, data: __piabRuntime || { active: false, runtime: null } }));
   process.exit(0);
 }`;
 	const wrappedScriptBody = `${defaultSessionInfo}\n${scriptBody}`;

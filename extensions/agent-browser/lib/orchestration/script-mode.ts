@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -9,6 +10,7 @@ import {
 	type AgentBrowserScriptRunResult,
 } from "../input-modes/script.js";
 import { isRecord } from "../parsing.js";
+import { appendBrowserTransition, getBrowserRecord } from "../browser-transcript.js";
 import { redactSensitiveText } from "../runtime.js";
 import type { AgentBrowserObservation, ArtifactVerificationSummary, FileArtifactMetadata, ImageObservation } from "../results/contracts.js";
 import { attachInlineImage } from "../results/presentation/artifacts.js";
@@ -16,34 +18,37 @@ import { projectAgentBrowserObservation } from "../results/presentation/content.
 import { redactPresentationData } from "../results/presentation/diagnostics.js";
 import type { AgentBrowserToolResult } from "./browser-run/types.js";
 
-const SCRIPT_SESSION_ENTRY_TYPE = "agent-browser-script-session";
 type ScriptSessionCleanupState = "active" | "closed" | "failed";
 
 export interface ScriptSessionLease {
+	ownerSessionId?: string;
 	cleanup: ScriptSessionCleanupState;
 	closeCommandArgs: string[];
 	launchAttempted: true;
 	sessionName: string;
 }
 
-// Retire outstanding pre-0.7 isolated-session leases when an old transcript resumes.
-export function getScriptSessionLeasesFromBranch(branch: unknown[]): Map<string, ScriptSessionLease> {
+// The offline converter retains outstanding isolated-session cleanup facts in canonical events.
+export function getScriptSessionLeasesFromBranch(branch: unknown[], ownerSessionId?: string): Map<string, ScriptSessionLease> {
 	const leases = new Map<string, ScriptSessionLease>();
 	for (const entry of branch) {
-		if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== SCRIPT_SESSION_ENTRY_TYPE || !isRecord(entry.data)) continue;
-		const { cleanup, closeCommandArgs, launchAttempted, sessionName } = entry.data;
+		const lease = getBrowserRecord(entry)?.event.state.scriptLease;
+		if (!isRecord(lease)) continue;
+		if (ownerSessionId !== undefined && lease.ownerSessionId !== ownerSessionId) continue;
+		const { cleanup, closeCommandArgs, launchAttempted, sessionName } = lease;
 		if (!isAgentBrowserScriptSessionName(sessionName)) continue;
 		const expected = createAgentBrowserScriptCloseArgs(sessionName);
 		if ((cleanup !== "active" && cleanup !== "closed" && cleanup !== "failed") || launchAttempted !== true
 			|| !Array.isArray(closeCommandArgs) || closeCommandArgs.length !== expected.length
 			|| !closeCommandArgs.every((token, index) => token === expected[index])) continue;
-		leases.set(sessionName, { cleanup, closeCommandArgs: expected, launchAttempted: true, sessionName });
+		leases.set(sessionName, { cleanup, closeCommandArgs: expected, launchAttempted: true, sessionName, ownerSessionId: typeof lease.ownerSessionId === "string" ? lease.ownerSessionId : undefined });
 	}
 	return leases;
 }
 
-export function appendScriptSessionLease(pi: ExtensionAPI, sessionName: string, cleanup: ScriptSessionCleanupState): void {
-	pi.appendEntry(SCRIPT_SESSION_ENTRY_TYPE, { cleanup, closeCommandArgs: createAgentBrowserScriptCloseArgs(sessionName), launchAttempted: true, sessionName });
+export function appendScriptSessionLease(pi: ExtensionAPI, sessionName: string, cleanup: ScriptSessionCleanupState, ownerSessionId: string): void {
+	appendBrowserTransition(pi, { event: { version: 1, phase: "state", operationId: randomUUID(), toolCallId: "cleanup", commandIndex: 0, isError: cleanup !== "closed",
+		state: { scriptLease: { cleanup, closeCommandArgs: createAgentBrowserScriptCloseArgs(sessionName), launchAttempted: true, sessionName, ownerSessionId } } } });
 }
 
 export function createBrowserCodeOutput() {

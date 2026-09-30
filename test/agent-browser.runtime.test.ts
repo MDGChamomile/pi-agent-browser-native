@@ -35,9 +35,11 @@ import {
 	redactSensitiveText,
 	redactSensitiveValue,
 	resolveManagedSessionState,
-	restoreManagedSessionStateFromBranch,
+	restoreManagedSessionStateFromBranch as restoreCanonicalManagedSessionState,
 	validateToolArgs,
 } from "../extensions/agent-browser/lib/runtime.js";
+import { convertBrowserEntries } from "../extensions/agent-browser/lib/browser-session-conversion.js";
+const restoreManagedSessionStateFromBranch = (branch: unknown[], baseName: string) => restoreCanonicalManagedSessionState(convertBrowserEntries(branch), baseName);
 import { createToolBranchEntry } from "./helpers/agent-browser-harness.js";
 
 test("buildExecutionPlan rejects ambiguous session identity flags without rejecting command text", () => {

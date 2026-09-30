@@ -5,7 +5,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import {
-	createExtensionHarness, createToolBranchEntry, executeRegisteredTool, readInvocationLog, runExtensionEvent,
+	createExtensionHarness, executeRegisteredTool, readInvocationLog, runExtensionEvent,
 	startAgentBrowserContractFixtureServer, withPatchedEnv, writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
 
@@ -109,11 +109,13 @@ console.log(JSON.stringify({ success: true, data: { title: "Fixture", url: "http
 			for (const h of [one, two, resumed]) await runExtensionEvent(h.handlers, "session_shutdown", { reason: "quit" }, h.ctx);
 			const calls = (await readInvocationLog(log)) as Array<{ args: string[]; restore: string | null; profile: string | null }>;
 			assert.ok(calls.some((call) => call.args.includes("url")), "real helper routing is covered");
+			const bootstraps = calls.filter(call => call.args.includes("get") && call.args.includes("title") && call.profile === "Default");
+			assert.equal(bootstraps.length, 2, "each root launches with its profile once; active daemons retain their own launch settings");
 			for (const call of calls) {
 				assert.ok(!call.args.includes("close"), "neither parent nor child exit owns group teardown");
 				const name = call.args[call.args.indexOf("--session") + 1];
 				assert.equal(call.restore, name === "unrelated" ? null : name);
-				assert.equal(call.profile, name === "unrelated" ? null : "Default");
+				if (name === "unrelated") assert.equal(call.profile, null);
 			}
 			const profiled = await executeRegisteredTool(one.tool, one.ctx, { args: ["--profile", "Profile 1", "open", "https://fixture.test/"] });
 			assert.equal(profiled.isError, false, profiled.content[0]?.text);
@@ -234,7 +236,7 @@ test("real native config shares a persistent fixture profile with fresh code con
 				const pidPath = join(socketDir, "namespaces", "team", "run", "shared.pid");
 				const pid = await readFile(pidPath, "utf8");
 				await runExtensionEvent(one.handlers, "session_shutdown", { reason: "quit" }, one.ctx);
-				two.setBranch([createToolBranchEntry({ details: opened.details ?? {} })]);
+				two.setBranch(one.ctx.sessionManager.getBranch().slice());
 				await runExtensionEvent(two.handlers, "session_start", { reason: "resume" }, two.ctx);
 				const reused = await executeRegisteredTool(two.tool, two.ctx, { args: ["eval", "--stdin"], stdin: 'localStorage.getItem("fixture-marker")' });
 				assert.equal(reused.isError, false, reused.content[0]?.text);

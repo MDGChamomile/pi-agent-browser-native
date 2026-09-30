@@ -129,6 +129,7 @@ export async function renderAgentBrowserObservation(options: {
 	json: boolean;
 	succeeded: boolean;
 	persistentArtifactStore?: PersistentSessionArtifactStore;
+	withArtifactWrite?: <T>(write: () => Promise<T>) => Promise<T>;
 }): Promise<{ content: ToolPresentation["content"]; artifactManifest?: SessionArtifactManifest }> {
 	const observation = projectAgentBrowserObservation(options.details, options.succeeded);
 	const images = options.content.filter(part => part.type === "image");
@@ -140,7 +141,8 @@ export async function renderAgentBrowserObservation(options: {
 		let spill: LargeOutputSpillWriteResult | undefined;
 		let spillError: string | undefined;
 		try {
-			spill = await writeLargeOutputSpillFile({ data: { ...observation, ...(!options.json ? { text: prose } : {}) }, persistentArtifactStore: options.persistentArtifactStore, text });
+			const write = () => writeLargeOutputSpillFile({ data: { ...observation, ...(!options.json ? { text: prose } : {}) }, persistentArtifactStore: options.persistentArtifactStore, text });
+			spill = await (options.withArtifactWrite ? options.withArtifactWrite(write) : write());
 			artifactManifest = applyArtifactManifest({ content: [], summary: "" }, artifactManifest, buildSpillArtifactEntries({
 				commandInfo: { command: typeof options.details.command === "string" ? options.details.command : undefined },
 				evictedArtifacts: spill.evictedArtifacts, path: spill.path, storageScope: spill.storageScope,
