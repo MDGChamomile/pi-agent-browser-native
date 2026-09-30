@@ -168,7 +168,7 @@ async function assertRealUpstreamRestoredDaemonReuseFailsClosed(): Promise<void>
 			assert.equal(opened.isError, false, `restored-daemon setup open failed: ${opened.content[0]?.text ?? ""}`);
 			sessionName = typeof opened.details?.sessionName === "string" ? opened.details.sessionName : undefined;
 
-			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details!, isError: opened.isError })] });
+			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: firstHarness.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(restoredHarness.handlers, "session_start", { reason: "resume" }, restoredHarness.ctx);
 			const blocked = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, {
 				args: ["--proxy", "http://127.0.0.1:8080", "open", "about:blank"],

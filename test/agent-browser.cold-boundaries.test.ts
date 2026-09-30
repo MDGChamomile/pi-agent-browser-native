@@ -117,7 +117,7 @@ process.exitCode = failed ? 1 : 0;
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: options.restoreDisabled ? "0" : undefined,
 			PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
-			const branch: unknown[] = [];
+			let branch: unknown[] = [];
 			const prefix = ["--namespace", "cold", ...(options.explicit ? ["--session", "caller"] : [])];
 			let harness = createExtensionHarness({ branch, cwd });
 			const call = async (params: AgentBrowserToolParams) => {
@@ -132,7 +132,8 @@ process.exitCode = failed ? 1 : 0;
 			}
 			const restore = async (reason: "quit" | "reload") => {
 				await runExtensionEvent(harness.handlers, "session_shutdown", { reason }, harness.ctx);
-				harness = createExtensionHarness({ branch: structuredClone(branch), cwd });
+				branch = structuredClone(harness.ctx.sessionManager.getBranch());
+				harness = createExtensionHarness({ branch, cwd });
 				await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 			};
 			await restore(options.live ? "reload" : "quit");
@@ -180,7 +181,7 @@ for (const state of ["cold", "known", "unknown", "reopen"]) {
 			assert.equal(timedOut.details?.failureCategory, "timeout");
 			assert.deepEqual((await page.calls()).slice(offset).map(row => row.args), [["--json", ...args]]);
 			assert.deepEqual({ ...await page.state(), timeoutInfo: undefined }, { ...nativeBefore, timeoutInfo: undefined });
-			for (const key of ["sessionTabTarget", "sessionTabTargetUnknown", "refSnapshot", "refSnapshotInvalidation", "sessionTabReopenPending"]) {
+			for (const key of ["sessionTabTarget", "sessionTabTargetUnknown", "refSnapshotInvalidation", "sessionTabReopenPending"]) {
 				assert.deepEqual(timedOut.details?.[key], before.details?.[key], key);
 			}
 			for (const key of ["timeoutPartialProgress", "artifacts", "artifactVerification", "browserWindow", "lifecycle", "data", "managedSessionOutcome"]) {

@@ -58,7 +58,7 @@ console.log(JSON.stringify({ success: true, data }));
 		await withPatchedEnv({ ...clearedBrowserEnv, HOME: root, USERPROFILE: root, PI_AGENT_BROWSER_SOCKET_DIR: join(root, "s"), PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1", PATH: `${root}${delimiter}${process.env.PATH}` }, async () => {
 			let selected = a;
 			let resolutions = 0;
-			const harness = createExtensionHarness({ cwd: a, sessionFile: join(a, "sessions", "one.jsonl"), onBusEvent(channel, request) {
+			const harness = createExtensionHarness({ cwd: a, sessionFile: join(root, "sessions", "one.jsonl"), onBusEvent(channel, request) {
 				if (channel === "pi-change-working-dir:resolve-execution-cwd") {
 					resolutions++;
 					(request as { result: { cwd: string } }).result = { cwd: selected };
@@ -115,7 +115,7 @@ console.log(JSON.stringify({ success: true, data }));
 			selected = b;
 			const snapshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["snapshot", "-i"] });
 			assert.equal(snapshot.isError, false, snapshot.content[0]?.text);
-			assert.ok(String(snapshot.details?.fullOutputPath).startsWith(join(a, "sessions", ".pi-agent-browser-artifacts")));
+			assert.ok(String(snapshot.details?.fullOutputPath).startsWith(join(root, "sessions", ".pi-agent-browser-artifacts")));
 			const calls = await readInvocationLog(log) as Array<{ args: string[]; cwd: string; profile: string; launch: number }>;
 			assert.ok(calls.every(call => call.cwd === a && call.profile === "Profile A"));
 			assert.ok(calls.filter(call => call.launch > 0).every(call => call.launch === 1), "live browser never restarted");
@@ -200,7 +200,7 @@ console.log(JSON.stringify({ success: true, data }));
 				assert.equal(code.isError, false, code.content[0]?.text);
 				assert.equal(code.details?.sessionName, fresh.details?.sessionName, "queued code must follow the fresh browser");
 				assert.equal((code.details?.outputFile as { absolutePath: string }).absolutePath, join(b, "queued-code.json"));
-				assert.equal((harness.appendedEntries.at(-1)?.data as { details: { managedSessionCwd: string } }).details.managedSessionCwd, b);
+				assert.equal((harness.appendedEntries.at(-1)?.data as { event: { state: { managedSessionCwd: string } } }).event.state.managedSessionCwd, b);
 			} finally { await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx); }
 		});
 	} finally { await rm(root, { recursive: true, force: true }); }

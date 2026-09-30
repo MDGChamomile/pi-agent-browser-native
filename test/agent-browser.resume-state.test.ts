@@ -117,16 +117,18 @@ test("agentBrowserExtension reconstructs managed session state on session_start 
 		tempDir,
 		`const fs = require("node:fs");
 const args = process.argv.slice(2);
+if (args.includes("session") && args.includes("info")) { process.stdout.write(JSON.stringify({ success: true, data: { active: false, runtime: null } })); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, userAgent: process.env.AGENT_BROWSER_USER_AGENT }) + "\\n");
 const envelope = args.includes("tab") && args.includes("list")
   ? { success: true, data: { tabs: [{ tabId: "t1", url: "https://dash.cloudflare.com/", active: true }] } }
   : args.includes("close") ? { success: true, data: { closed: true } }
+  : args.includes("snapshot") ? { success: true, data: { origin: "https://dash.cloudflare.com/", refs: {}, snapshot: "" } }
   : { success: true, data: { url: args[args.length - 1] } };
 process.stdout.write(JSON.stringify(envelope));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const firstHarness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(firstHarness.handlers, "session_start", { reason: "new" }, firstHarness.ctx);
 
@@ -142,6 +144,7 @@ process.stdout.write(JSON.stringify(envelope));`,
 			assert.equal((await readInvocationLog(logPath)).length, 2);
 
 			const resumedBranch = [
+				...firstHarness.ctx.sessionManager.getBranch(),
 				createToolBranchEntry({
 					details: {
 						...firstOpen.details,
@@ -166,7 +169,7 @@ process.stdout.write(JSON.stringify(envelope));`,
 			const snapshot = await executeRegisteredTool(resumedHarness.tool, resumedHarness.ctx, { args: ["--session", sessionName, "snapshot", "-i"] });
 			assert.equal(snapshot.isError, false, JSON.stringify(snapshot));
 			assert.equal((snapshot.details?.compatibilityWorkaround as { id?: string } | undefined)?.id, "cloudflare-headless-user-agent");
-			const snapshotInvocation = (await readInvocationLog(logPath)).at(-1) as { args: string[]; userAgent?: string };
+			const snapshotInvocation = (await readInvocationLog(logPath)).filter(row => row.args.includes("snapshot")).at(-1) as { args: string[]; userAgent?: string };
 			assert.ok(snapshotInvocation.args.includes("--user-agent"));
 			assert.match(snapshotInvocation.userAgent ?? "", /Chrome\/\d+\.0\.0\.0/);
 
@@ -639,10 +642,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			assertIsString(reservedSessionName);
 			assert.match(reservedSessionName, new RegExp(`^${baseSessionName.replace(/-fresh-[a-f0-9]{10}$/, "")}-fresh-[a-f0-9]{10}$`));
 
-			harness.setBranch([
-				createToolBranchEntry({ details: open.details ?? {}, isError: open.isError }),
-				createToolBranchEntry({ details: closeBase.details ?? {}, isError: closeBase.isError }),
-			]);
+			harness.setBranch(harness.ctx.sessionManager.getBranch().slice());
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "closed-base", oldLeafId: "live" }, harness.ctx);
 
 			const followUp = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "url"] });
@@ -747,12 +747,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const closeFresh = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", firstFreshSessionName, "close"] });
 			assert.equal(closeFresh.isError, false, JSON.stringify(closeFresh));
 
-			harness.setBranch([
-				createToolBranchEntry({ details: baseOpen.details ?? {}, isError: baseOpen.isError }),
-				createToolBranchEntry({ details: closeBase.details ?? {}, isError: closeBase.isError }),
-				createToolBranchEntry({ details: freshUse.details ?? {}, isError: freshUse.isError }),
-				createToolBranchEntry({ details: closeFresh.details ?? {}, isError: closeFresh.isError }),
-			]);
+			harness.setBranch(harness.ctx.sessionManager.getBranch().slice());
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 
 			const restoredFollowUp = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "url"] });
@@ -1024,10 +1019,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			assert.equal(followUp.details?.browserWindow, undefined);
 			assert.doesNotMatch(followUp.content[0]?.text ?? "", /Headed browser handoff/);
 
-			harness.setBranch([
-				createToolBranchEntry({ details: open.details ?? {}, isError: open.isError }),
-				createToolBranchEntry({ details: followUp.details ?? {}, isError: followUp.isError }),
-			]);
+			harness.setBranch(harness.ctx.sessionManager.getBranch().slice());
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "headed", oldLeafId: "live" }, harness.ctx);
 			const restoredFollowUp = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["snapshot", "-i"] });
 			assert.equal(restoredFollowUp.isError, false, JSON.stringify(restoredFollowUp));
@@ -1143,7 +1135,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal(open.isError, false, JSON.stringify(open));
 			assert.equal(open.details?.managedSessionHeadedAutosaveDisabled, true);
 			assert.equal(open.details?.managedSessionHeadedAutosaveInterval, "0");
-			branch = [createToolBranchEntry({ details: open.details ?? {}, isError: open.isError })];
+			branch = harness.ctx.sessionManager.getBranch().slice();
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 		});
 
@@ -1163,7 +1155,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal(freshOpen.isError, false, JSON.stringify(freshOpen));
 			assert.equal(freshOpen.details?.managedSessionHeadedAutosaveDisabled, undefined);
 			assert.equal(freshOpen.details?.managedSessionHeadedAutosaveInterval, "1000");
-			branch = [createToolBranchEntry({ details: freshOpen.details ?? {}, isError: freshOpen.isError })];
+			branch = harness.ctx.sessionManager.getBranch().slice();
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 		});
 
@@ -1291,11 +1283,7 @@ if (command === "session") {
 			assert.equal(oldSessionFollowUp.details?.managedSessionHeadedAutosaveDisabled, true);
 
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: headedOpen.details ?? {}, isError: headedOpen.isError }),
-					createToolBranchEntry({ details: replacement.details ?? {}, isError: replacement.isError }),
-					createToolBranchEntry({ details: oldSessionFollowUp.details ?? {}, isError: oldSessionFollowUp.isError }),
-				],
+				branch: harness.ctx.sessionManager.getBranch().slice(),
 				cwd: tempDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1343,7 +1331,7 @@ const restoreKey = process.env.AGENT_BROWSER_RESTORE ?? null;
 const log = (event) => fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, event, namespace, namespaceEnv: process.env.AGENT_BROWSER_NAMESPACE ?? null, sessionName, restoreKey, observedRestoreKey: active?.restoreKey, active: active !== null }) + "\\n");
 log("start");
 if (command === "session") {
-  process.stdout.write(JSON.stringify({ success: true, data: { active: active !== null, runtime: active ? { restoreKey: active.restoreKey } : null } }));
+  process.stdout.write(JSON.stringify({ success: true, data: { active: active !== null, runtime: active ? { restoreKey: active.restoreKey, backgroundPid: process.ppid, socketDir: ${JSON.stringify(tempDir)}, browserLaunched: true } : null } }));
 } else if (command === "close" && namespace === "review-space" && !fs.existsSync(${JSON.stringify(closeGate)})) {
   process.stdout.write(JSON.stringify({ success: false, error: "forced old-session close failure" }));
   process.exit(1);
@@ -1427,7 +1415,7 @@ if (command === "session") {
 					assert.deepEqual(selected.details?.effectiveArgs, ["--json", "--session", oldSession, "select", "@e4", "chocolate"]);
 					const dispatched = (await readEvents()).slice(before);
 					const inspections = dispatched.filter((entry) => entry.args.includes("session") && entry.args.includes("info"));
-					assert.equal(inspections.length, 2);
+					assert.equal(inspections.length, 5, "owned-policy inspections and each new/ref-reusing capture verify native generation");
 					assert.equal(inspections.every((entry) => entry.active && entry.observedRestoreKey === launched.restoreKey), true, JSON.stringify(inspections));
 					assert.equal(dispatched.every((entry) => entry.sessionName === oldSession && entry.namespace === "review-space"), true, JSON.stringify(dispatched));
 					const content = dispatched.filter((entry) => !entry.args.includes("session"));
@@ -1465,7 +1453,7 @@ if (command === "session") {
 
 					await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 					const resumed = createExtensionHarness({
-						branch: [open, replacement, snapshot, selected, waitResult, currentResult].map((result) => createToolBranchEntry({ details: result.details ?? {}, isError: result.isError })),
+						branch: [...harness.ctx.sessionManager.getBranch()],
 						cwd,
 					});
 					cleanupHarness = resumed;
@@ -1523,7 +1511,7 @@ if (args.includes("session") && args.includes("info")) {
 }`);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const compatOpen = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://dash.cloudflare.com"], sessionMode: "fresh" });
@@ -1543,11 +1531,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal((oldFollowUp.details?.compatibilityWorkaround as { id?: string } | undefined)?.id, "cloudflare-headless-user-agent");
 
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: compatOpen.details ?? {}, isError: compatOpen.isError }),
-					createToolBranchEntry({ details: replacement.details ?? {}, isError: replacement.isError }),
-					createToolBranchEntry({ details: oldFollowUp.details ?? {}, isError: oldFollowUp.isError }),
-				],
+				branch: [...harness.ctx.sessionManager.getBranch()],
 				cwd: tempDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1607,10 +1591,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal((freshFailure.details?.managedSessionOutcome as { replacedSessionClosed?: boolean } | undefined)?.replacedSessionClosed, true);
 
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: oldOpen.details ?? {}, isError: oldOpen.isError }),
-					createToolBranchEntry({ details: freshFailure.details ?? {}, isError: freshFailure.isError }),
-				],
+				branch: harness.ctx.sessionManager.getBranch().slice(),
 				cwd: tempDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1655,7 +1636,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { url: args[args.leng
 			assert.equal(typeof firstSessionName, "string");
 
 			const resumedHarness = createExtensionHarness({
-				branch: [createToolBranchEntry({ details: firstOpen.details ?? {}, isError: firstOpen.isError })],
+				branch: firstHarness.ctx.sessionManager.getBranch().slice(),
 				cwd: secondDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1767,6 +1748,7 @@ fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, idleTimeout
 const envelope = args.includes("tab") && args.includes("list")
   ? { success: true, data: { tabs: [{ tabId: "t1", title: "Profiled", url: "https://example.com/profile", active: true }] } }
   : args.includes("close") ? { success: true, data: { closed: true } }
+  : args.includes("snapshot") ? { success: true, data: { origin: "https://example.com/profile", refs: {}, snapshot: "" } }
   : { success: true, data: { title: args.includes("--profile") ? "Profiled" : "Public", url: args[args.length - 1], idleTimeout: process.env.AGENT_BROWSER_IDLE_TIMEOUT_MS ?? null } };
 process.stdout.write(JSON.stringify(envelope));`,
 	);
@@ -1801,10 +1783,7 @@ process.stdout.write(JSON.stringify(envelope));`,
 			await runExtensionEvent(firstHarness.handlers, "session_shutdown");
 
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: firstOpen.details ?? {}, isError: firstOpen.isError }),
-					createToolBranchEntry({ details: profiledOpen.details ?? {}, isError: profiledOpen.isError }),
-				],
+				branch: [...firstHarness.ctx.sessionManager.getBranch()],
 				cwd: tempDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1817,7 +1796,7 @@ process.stdout.write(JSON.stringify(envelope));`,
 			assert.equal(followUpSnapshot.details?.usedImplicitSession, true);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.equal(invocations.length, 8);
+			assert.equal(invocations.length, 10);
 			assert.deepEqual(invocations[0]?.args, ["--json", "--session", String(firstSessionName), "open", "https://example.com"]);
 			assert.equal(invocations[0]?.idleTimeout, "1234");
 			assert.deepEqual(invocations[1]?.args, ["--json", "--session", String(firstSessionName), "tab", "list"]);
@@ -1837,6 +1816,8 @@ process.stdout.write(JSON.stringify(envelope));`,
 			assert.deepEqual(invocations[6]?.args, ["--json", "--session", String(freshSessionName), "tab", "list"]);
 			assert.deepEqual(invocations[7]?.args, ["--json", "--session", String(freshSessionName), "snapshot", "-i"]);
 			assert.equal(invocations[7]?.idleTimeout, "1234");
+			assert.deepEqual(invocations.slice(8).map(row => row.args.slice(-2)), [["tab", "list"], ["tab", "list"]], "post-capture binding checks stay on the restored session");
+			assert.equal(invocations.slice(8).every(row => row.idleTimeout === "1234"), true);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -1873,7 +1854,7 @@ process.stdout.write(JSON.stringify(envelope));`,
 			assert.equal(typeof secondFreshSessionName, "string");
 			assert.notEqual(secondFreshSessionName, firstFreshSessionName);
 
-			harness.setBranch([createToolBranchEntry({ details: secondFresh.details ?? {}, isError: false })]);
+			harness.setBranch(harness.ctx.sessionManager.getBranch().slice());
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "branch-second", oldLeafId: "branch-current" }, harness.ctx);
 
 			const thirdFresh = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://example.com/fresh-3"], sessionMode: "fresh" });
@@ -2168,8 +2149,8 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			const snapshot = await executeRegisteredTool(initial.tool, initial.ctx, { args: ["--session", "named", "snapshot", "-i"] });
 			assert.equal((snapshot.details?.sessionTabTarget as { targetId?: string })?.targetId, "FIRST");
 			await writeFile(statePath, "SECOND");
-			const branch = [createToolBranchEntry({ details: snapshot.details!, isError: false })];
-			const resumed = createExtensionHarness({ cwd: tempDir, branch });
+			const branch = initial.ctx.sessionManager.getBranch().slice();
+			const resumed = createExtensionHarness({ cwd: tempDir, branch: branch.slice() });
 			await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
 			const clicked = await executeRegisteredTool(resumed.tool, resumed.ctx, { args: ["--session", "named", "click", "#save"] });
 			assert.equal(clicked.isError, false, JSON.stringify(clicked));
@@ -2187,7 +2168,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			const popup = await executeRegisteredTool(initial.tool, initial.ctx, { args: ["--session", "named", "click", "#popup"] });
 			assert.equal((popup.details?.sessionTabTarget as { targetId?: string })?.targetId, "SECOND");
 			await writeFile(statePath, "GONE");
-			const closedTarget = createExtensionHarness({ cwd: tempDir, branch });
+			const closedTarget = createExtensionHarness({ cwd: tempDir, branch: branch.slice() });
 			await runExtensionEvent(closedTarget.handlers, "session_start", { reason: "resume" }, closedTarget.ctx);
 			const rejected = await executeRegisteredTool(closedTarget.tool, closedTarget.ctx, { args: ["--session", "named", "click", "#save"] });
 			assert.equal(rejected.isError, true);
@@ -2247,7 +2228,7 @@ if (!success) process.exitCode = 1;`);
 				});
 				assert.equal(failed.isError, true);
 				assert.deepEqual(failed.details?.sessionTabTarget, { title: "Error", url: "chrome-error://chromewebdata/", targetId: "FIRST" });
-				const replay = createExtensionHarness({ cwd: tempDir, branch: [...branch, createToolBranchEntry({ details: failed.details!, isError: true })] });
+				const replay = createExtensionHarness({ cwd: tempDir, branch: live.ctx.sessionManager.getBranch().slice() });
 				await runExtensionEvent(replay.handlers, "session_start", { reason: "resume" }, replay.ctx);
 				for (const harness of [live, replay]) {
 					const snapshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "named", "snapshot", "-i"] });

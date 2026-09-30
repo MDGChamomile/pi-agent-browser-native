@@ -17,6 +17,9 @@ import { pathToFileURL } from "node:url";
 
 import { compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
 import { getAgentBrowserSocketDir } from "../extensions/agent-browser/lib/process.js";
+import { applyArtifactChanges, getBrowserRecord } from "../extensions/agent-browser/lib/browser-transcript.js";
+import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
+import type { SessionArtifactManifest } from "../extensions/agent-browser/lib/results/contracts.js";
 
 function initializeGitProject(cwd: string): void {
 	execFileSync("git", ["init", "-q", cwd], { stdio: "ignore" });
@@ -467,7 +470,10 @@ if (args.includes("session") && args.includes("info")) {
 
 			assert.equal((opened.details?.compatibilityWorkaround as { id?: string } | undefined)?.id, "cloudflare-headless-user-agent");
 			const afterCloudflareOpen = await readInvocationLog(logPath);
-			assert.equal(afterCloudflareOpen.filter((entry) => entry.args.includes("session") && entry.args.includes("info")).length, 1);
+			const daemonProbes = afterCloudflareOpen.filter((entry) => entry.args.includes("session") && entry.args.includes("info"));
+			assert.equal(daemonProbes.length, 2, "inspect before launch and capture the resulting daemon generation");
+			assert.ok(afterCloudflareOpen.indexOf(daemonProbes[0]!) < afterCloudflareOpen.findIndex(entry => entry.args.includes("open")));
+			assert.ok(afterCloudflareOpen.indexOf(daemonProbes[1]!) > afterCloudflareOpen.findIndex(entry => entry.args.includes("open")));
 			const cloudflareInvocation = afterCloudflareOpen.find((entry) => entry.args.includes("https://dash.cloudflare.com"));
 			assert.ok(cloudflareInvocation?.args.includes("--user-agent"));
 			const cloudflareBrowserArgs = cloudflareInvocation?.args[cloudflareInvocation.args.indexOf("--args") + 1] ?? "";
@@ -542,7 +548,7 @@ if (args.includes("session") && args.includes("info")) {
 			await writeFile(callerState, "{}");
 			await writeFile(join(tempDir, "daemon-state.json"), JSON.stringify({ active: true, restoreKey }));
 
-			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details! })] });
+			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: harness.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(restoredHarness.handlers, "session_start", { reason: "new" }, restoredHarness.ctx);
 			const restoredDaemonReuse = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, {
 				args: ["--namespace", "TEAM", "--proxy", "http://127.0.0.1:8080", "open", "https://example.com"],
@@ -595,7 +601,7 @@ if (args.includes("session") && args.includes("info")) {
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
 			const seeded = await executeRegisteredTool(first.tool, first.ctx, { args: ["get", "url"], sessionMode: "fresh" });
 			assert.equal(seeded.isError, false, JSON.stringify(seeded));
-			const second = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: seeded.details! })] });
+			const second = createExtensionHarness({ cwd: tempDir, branch: first.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(second.handlers, "session_start", { reason: "resume" }, second.ctx);
 			await writeFile(statePath, JSON.stringify({ active: false, restoreKey: null }));
 			const compatible = executeRegisteredTool(first.tool, first.ctx, { args: ["open", "https://example.com/safe"] });
@@ -707,21 +713,29 @@ if (args.includes("get") && args.includes("url")) {
 			const fastScreenshot = executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "fast", "screenshot", fastPath] });
 			const concurrentResults = await Promise.all([slowScreenshot, fastScreenshot]);
 			assert.equal(concurrentResults.every((result) => result.isError === false), true, JSON.stringify(concurrentResults));
-			const aggregateEntries = (concurrentResults[1]?.details?.artifactManifest as { entries?: Array<{ absolutePath?: string; path: string }> } | undefined)?.entries ?? [];
+			const recentEntries = () => {
+				let manifest: SessionArtifactManifest | undefined;
+				for (const entry of harness.ctx.sessionManager.getBranch()) manifest = applyArtifactChanges(manifest, getBrowserRecord(entry)?.event.artifacts);
+				return manifest?.entries ?? [];
+			};
+			const ownReceipts = (concurrentResults[1]?.details?.artifactManifest as { entries?: Array<{ absolutePath?: string; path: string }> } | undefined)?.entries ?? [];
+			assert.deepEqual(new Set(ownReceipts.map(entry => entry.absolutePath ?? entry.path)), new Set([fastPath]));
+			const aggregateEntries = recentEntries();
 			assert.deepEqual(new Set(aggregateEntries.map((entry) => entry.absolutePath ?? entry.path)), new Set([slowPath, fastPath]));
 
-			harness.setBranch([concurrentResults[0], concurrentResults[1]].map((result) => ({
-				type: "message",
-				message: { details: result?.details, isError: result?.isError, toolName: "agent_browser" },
-			})));
+			const persistedBranch = harness.ctx.sessionManager.getBranch().slice();
+			harness.setBranch([]);
+			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: null, oldLeafId: "artifact-branch" }, harness.ctx);
+			harness.setBranch(persistedBranch);
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "artifact-branch", oldLeafId: null }, harness.ctx);
 			const restored = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "restored", "get", "title"] });
-			const restoredEntries = (restored.details?.artifactManifest as { entries?: Array<{ absolutePath?: string; path: string }> } | undefined)?.entries ?? [];
+			assert.equal(restored.details?.artifactManifest, undefined, "ordinary reads do not repeat prior receipts");
+			const restoredEntries = recentEntries();
 			assert.deepEqual(new Set(restoredEntries.map((entry) => entry.absolutePath ?? entry.path)), new Set([slowPath, fastPath]));
 
 			const finalScreenshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "final", "screenshot", finalPath] });
 			assert.equal(finalScreenshot.isError, false, JSON.stringify(finalScreenshot));
-			const entries = (finalScreenshot.details?.artifactManifest as { entries?: Array<{ absolutePath?: string; path: string }> } | undefined)?.entries ?? [];
+			const entries = recentEntries();
 			const retainedPaths = new Set(entries.map((entry) => entry.absolutePath ?? entry.path));
 			assert.equal(retainedPaths.size, 2);
 			assert.equal(retainedPaths.has(finalPath), true);
@@ -853,7 +867,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal(sameInstanceBlocked.isError, true);
 			assert.match(String(sameInstanceBlocked.details?.validationError ?? ""), /does not match the requested managed-restore policy/);
 
-			const resumedWithoutGit = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details! })] });
+			const resumedWithoutGit = createExtensionHarness({ cwd: tempDir, branch: first.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(resumedWithoutGit.handlers, "session_start", { reason: "new" }, resumedWithoutGit.ctx);
 			const resumedWithoutGitBlocked = await executeRegisteredTool(resumedWithoutGit.tool, resumedWithoutGit.ctx, { args: ["open", "https://example.com"] });
 			assert.equal(resumedWithoutGitBlocked.isError, true);
@@ -865,7 +879,7 @@ if (args.includes("session") && args.includes("info")) {
 			assert.equal(sameInstanceReplacementBlocked.isError, true, JSON.stringify(sameInstanceReplacementBlocked));
 			assert.match(String(sameInstanceReplacementBlocked.details?.validationError ?? ""), /does not match the requested managed-restore policy/);
 
-			const replacementHarness = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details! })] });
+			const replacementHarness = createExtensionHarness({ cwd: tempDir, branch: first.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(replacementHarness.handlers, "session_start", { reason: "new" }, replacementHarness.ctx);
 			const replacementBlocked = await executeRegisteredTool(replacementHarness.tool, replacementHarness.ctx, { args: ["open", "https://example.com"] });
 			assert.equal(replacementBlocked.isError, true);
@@ -1003,7 +1017,7 @@ if (args.includes("session") && args.includes("info")) {
 				assert.equal(opened.isError, false, JSON.stringify(opened));
 				assert.equal(opened.details?.managedSessionRestoreDisabled, true);
 				const sessionName = opened.details?.sessionName;
-				const branch = [{ type: "message", message: { details: opened.details, isError: false, toolName: "agent_browser" } }];
+				const branch = harness.ctx.sessionManager.getBranch().slice();
 				harness.setBranch(branch);
 				await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "restore-disabled", oldLeafId: null }, harness.ctx);
 
@@ -1493,7 +1507,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { title: "ok", url: a
 			});
 			const incompatibleOutcome = incompatibleFailure.details?.managedSessionOutcome as { attemptedSessionName?: string } | undefined;
 			assert.ok(incompatibleOutcome?.attemptedSessionName);
-			assert.equal(incompatibleFailure.details?.managedSessionRestoreDisabled, undefined);
+			assert.equal(incompatibleFailure.details?.managedSessionRestoreDisabled, undefined, JSON.stringify(incompatibleFailure));
 		});
 	} finally {
 			await rm(tempDir, { force: true, recursive: true });
@@ -2257,7 +2271,7 @@ if (args.includes("screenshot")) {
 			const deletedScreenshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["screenshot", deletedScreenshotPath] });
 			assert.equal(deletedScreenshot.isError, false);
 			await rm(deletedScreenshotPath, { force: true });
-			assert.equal((deletedScreenshot.details?.artifactManifest as { liveCount?: number } | undefined)?.liveCount, 2);
+			assert.equal((deletedScreenshot.details?.artifactManifest as { liveCount?: number } | undefined)?.liveCount, 1, "an invocation reports its own receipt, while close checks the retained recent view");
 
 			const close = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["close"] });
 			assert.equal(close.isError, false);
@@ -2454,7 +2468,8 @@ if (args.includes("open")) {
 			assert.doesNotMatch(text.text, /Agent-browser candidate fallbacks:/);
 			const overlayBlockers = click.details?.overlayBlockers as { candidates?: Array<{ ref?: string; args?: string[] }> } | undefined;
 			assert.equal(overlayBlockers?.candidates?.[0]?.ref, "@e5");
-			assert.deepEqual((click.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e5", "e6", "e7"]);
+			assert.equal(click.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(click.details?.sessionName)).refSnapshot?.refIds, ["e5", "e6", "e7"]);
 			const nextActions = click.details?.nextActions as Array<{ id?: string; params?: { args?: string[] } }> | undefined;
 			assert.deepEqual(nextActions?.map((action) => action.id), ["inspect-after-mutation", "inspect-overlay-state", "try-overlay-blocker-candidate-1"]);
 			assert.deepEqual(nextActions?.[1]?.params?.args, ["--session", click.details?.sessionName as string, "snapshot", "-i"]);

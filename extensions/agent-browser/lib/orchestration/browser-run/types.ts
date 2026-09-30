@@ -61,9 +61,11 @@ export interface OwnedManagedSessionReference {
 	headedManagedAutosaveInterval?: string;
 	namespace?: string;
 	sessionName: string;
+	socketDir?: string;
 }
 
 export interface BrowserRunState {
+	observedBrowserEffects?: Record<string, unknown>;
 	activeRecordingReservations?: ReadonlyMap<string, ActiveRecordingReservation>;
 	attachedSessionKeys: Set<string>;
 	artifactManifest?: SessionArtifactManifest;

@@ -14,7 +14,6 @@ import test from "node:test";
 
 import {
 	createExtensionHarness,
-	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
@@ -516,6 +515,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const connect = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "connect", "9222"] });
 			const url = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "get", "url"] });
 			const snapshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "snapshot", "-i"] });
+			const attachedBranch = harness.ctx.sessionManager.getBranch().slice();
 			const attachedCloseThenOpen = await executeRegisteredTool(harness.tool, harness.ctx, {
 				args: ["--session", "cloudflare-live", "batch"],
 				stdin: JSON.stringify([["close"], ["open", "https://dash.cloudflare.com/"]]),
@@ -547,6 +547,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			});
 			assert.equal(attachedTerminalClose.isError, false, attachedTerminalClose.content[0]?.type === "text" ? attachedTerminalClose.content[0].text : "terminal close batch failed");
 			assert.equal(attachedTerminalClose.details?.refSnapshot, undefined);
+			const terminalBranch = harness.ctx.sessionManager.getBranch().slice();
 			const requestsAfterTerminalClose = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "network", "requests"] });
 			assert.equal(requestsAfterTerminalClose.isError, false, requestsAfterTerminalClose.content[0]?.type === "text" ? requestsAfterTerminalClose.content[0].text : "post-close requests failed");
 			assert.equal(requestsAfterTerminalClose.details?.attachedBrowserSession, undefined);
@@ -558,7 +559,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const terminalResumeInvocationCount = (await readInvocationLog(logPath)).length;
 			const terminalResumeHarness = createExtensionHarness({
-				branch: [connect, url, snapshot, attachedTerminalClose].map((result) => createToolBranchEntry({ details: result.details ?? {}, isError: result.isError })),
+				branch: terminalBranch,
 				cwd: tempDir,
 				prompt: "Resume after the attached session was closed by a batch.",
 			});
@@ -573,11 +574,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const invocationCount = (await readInvocationLog(logPath)).length;
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: connect.details ?? {}, isError: connect.isError }),
-					createToolBranchEntry({ details: url.details ?? {}, isError: url.isError }),
-					createToolBranchEntry({ details: snapshot.details ?? {}, isError: snapshot.isError }),
-				],
+				branch: attachedBranch,
 				cwd: tempDir,
 				prompt: "Resume the attached Cloudflare tab.",
 			});
@@ -609,6 +606,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			await runExtensionEvent(managedHarness.handlers, "session_start", { reason: "new" }, managedHarness.ctx);
 			const managedUrl = await executeRegisteredTool(managedHarness.tool, managedHarness.ctx, { args: ["--cdp", "9222", "get", "url"], sessionMode: "fresh" });
 			assert.equal(managedUrl.isError, false);
+			const managedBranch = managedHarness.ctx.sessionManager.getBranch().slice();
 			const managedSessionName = managedUrl.details?.sessionName;
 			assert.equal(typeof managedSessionName, "string");
 			await writeFile(unsafeTargetPath, "unsafe", "utf8");
@@ -624,7 +622,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const namespaceResumeInvocationCount = (await readInvocationLog(logPath)).length;
 			await withPatchedEnv({ AGENT_BROWSER_NAMESPACE: "changed-after-attach" }, async () => {
 				const namespaceResumeHarness = createExtensionHarness({
-					branch: [createToolBranchEntry({ details: managedUrl.details ?? {}, isError: managedUrl.isError })],
+					branch: managedBranch,
 					cwd: tempDir,
 					prompt: "Close the default-namespace attachment after the process environment namespace changes.",
 				});
@@ -646,7 +644,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				assert.equal(typeof failedSessionName, "string");
 				const failedInvocationCount = (await readInvocationLog(logPath)).length;
 				const failedResumeHarness = createExtensionHarness({
-					branch: [createToolBranchEntry({ details: failedAttach.details ?? {}, isError: failedAttach.isError })],
+					branch: failedHarness.ctx.sessionManager.getBranch().slice(),
 					cwd: tempDir,
 					prompt: "Resume and clean up the failed attachment that retained an active daemon.",
 				});
@@ -669,7 +667,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				assert.ok(envInvocations.every((entry) => !entry.args.includes("--args") && !entry.args.includes("--allow-file-access")));
 				await withPatchedEnv({ AGENT_BROWSER_CDP: undefined }, async () => {
 					const resumedEnvHarness = createExtensionHarness({
-						branch: [createToolBranchEntry({ details: envSnapshot.details ?? {}, isError: envSnapshot.isError })],
+						branch: envHarness.ctx.sessionManager.getBranch().slice(),
 						cwd: tempDir,
 						prompt: "Resume the environment-attached session without the original environment flag.",
 					});

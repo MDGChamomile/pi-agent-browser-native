@@ -28,12 +28,14 @@
   },
   "bin": {
     "pi-agent-browser-config": "scripts/config.mjs",
+    "pi-agent-browser-convert": "scripts/convert-browser-session.mjs",
     "pi-agent-browser-doctor": "scripts/doctor.mjs"
   },
   "files": [
     "dist",
     "platform-smoke.config.mjs",
     "scripts/config.mjs",
+    "scripts/convert-browser-session.mjs",
     "scripts/doctor.mjs",
     "scripts/prepare.mjs",
     "scripts/build.mjs",
@@ -48,6 +50,7 @@
     "docs/COMMAND_REFERENCE.md",
     "docs/ELECTRON.md",
     "docs/RELEASE.md",
+    "docs/SESSION_STORAGE.md",
     "docs/platform-smoke.md",
     "docs/REQUIREMENTS.md",
     "docs/SUPPORT_MATRIX.md",
@@ -113,6 +116,7 @@
   "dependencies": {
     "cross-spawn": "7.0.6",
     "path-key": "3.1.1",
+    "stream-json": "3.7.0",
     "which": "2.0.2"
   }
 }
