@@ -6,19 +6,28 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { WEB_SEARCH_PROMPT_GUIDELINE } from "../extensions/agent-browser/lib/playbook.js";
-import { buildPromptPolicy, getLatestUserPrompt } from "../extensions/agent-browser/lib/prompt-policy.js";
+import { buildPromptPolicy, getLatestUserMessage, getMessageText } from "../extensions/agent-browser/lib/prompt-policy.js";
 
-test("buildPromptPolicy and getLatestUserPrompt derive direct agent-browser bash policy from prompt text without globals", () => {
-	const prompt = getLatestUserPrompt([
-		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Not relevant" }] } },
-		{ type: "message", message: { role: "user", content: [{ type: "text", text: "Please debug the browser integration via bash." }] } },
-	]);
+test("prompt policy restores the latest raw user intent without projecting or copying historical context", () => {
+	const manager = SessionManager.inMemory();
+	for (let index = 0; index < 1_000; index++) manager.appendCustomEntry("history", { index });
+	const userId = manager.appendMessage({ role: "user", content: [{ type: "text", text: "Please debug the browser integration via bash." }], timestamp: 0 });
+	manager.appendContextEdit(userId, null);
+	manager.appendCompaction("User text omitted from model context", null, 0);
+	let reads = 0;
+	const message = getLatestUserMessage({
+		getLeafId: () => manager.getLeafId(),
+		getEntry(id) { reads += 1; return manager.getEntry(id); },
+	});
+	const prompt = getMessageText(message?.content);
 	const policy = buildPromptPolicy(prompt);
 
 	assert.equal(prompt, "Please debug the browser integration via bash.");
 	assert.equal(policy.allowLegacyAgentBrowserBash, true);
+	assert.equal(reads, 3, "restoration stops at the latest raw user instead of reading the older history");
 });
 
 test("buildPromptPolicy does not allow direct agent-browser bash for generic docs prompts unrelated to agent-browser", () => {

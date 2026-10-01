@@ -627,6 +627,7 @@ test("Pi pipeline preserves persisted parseable JSON content while patching isEr
 		assert.equal((result.details as { resultCategory?: string } | undefined)?.resultCategory, "failure");
 		const text = result.content.find((item) => item.type === "text")?.text ?? "";
 		assert.doesNotMatch(text, /Pi tool isError/);
-		assert.deepEqual(JSON.parse(text), { error: "json boom", data: { code: "boom" }, success: false, resultCategory: "failure", failureCategory: "upstream-error", summary: "json boom", sessionName: (result.details as { sessionName: string }).sessionName });
+		// summary is dropped when byte-identical to error so bounded observations do not double-count failure text.
+		assert.deepEqual(JSON.parse(text), { error: "json boom", data: { code: "boom" }, success: false, resultCategory: "failure", failureCategory: "upstream-error", sessionName: (result.details as { sessionName: string }).sessionName });
 	}
 });

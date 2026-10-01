@@ -3,7 +3,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -135,10 +135,9 @@ test("project config can disable web-search execution despite env fallback", asy
 			const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
 			assert.ok(tool);
 			assert.ok(harness.getTool("agent_browser"));
-			await assert.rejects(
-				() => executeRegisteredTool(tool, harness.ctx, { query: "disabled project config" }),
-				/agent_browser_web_search is disabled by pi-agent-browser-native config/,
-			);
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "disabled project config" });
+			assert.equal(result.isError, true);
+			assert.match(JSON.stringify(result.structuredContent), /"success":false.*agent_browser_web_search is disabled by pi-agent-browser-native config/);
 		});
 	});
 });
@@ -251,6 +250,15 @@ test("auto provider uses Brave when only BRAVE_API_KEY is configured", async () 
 			assert.match(text, /Brave Only/);
 			assert.equal(result.details?.provider, "brave");
 			assert.equal(result.details?.searchType, undefined);
+			const observation = result.structuredContent as { success: boolean; resultCategory: string; data: Record<string, unknown> };
+			assert.equal(observation.success, true);
+			assert.equal(observation.resultCategory, "success");
+			assert.equal(observation.data.provider, "brave");
+			assert.equal(observation.data.query, "brave only");
+			assert.deepEqual(observation.data.results, [{ title: "Brave Only", url: "https://example.com/brave", description: "Brave result" }]);
+			assert.equal(result.isError, false);
+			assert.equal(tool.namespace?.name, "browser");
+			assert.ok(tool.outputSchema);
 			assert.doesNotMatch(JSON.stringify(result), /brave-secret/);
 		});
 	});
@@ -265,10 +273,9 @@ test("rejects explicit Exa-only filters when Brave is the resolved provider", as
 		await withFakeFetch(() => {
 			throw new Error("fetch should not be called");
 		}, async () => {
-			await assert.rejects(
-				() => executeRegisteredTool(tool, harness.ctx, { query: "official docs", includeDomains: ["example.com"] }),
-				/includeDomains requires provider exa; resolved provider was brave/,
-			);
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "official docs", includeDomains: ["example.com"] });
+			assert.equal(result.isError, true);
+			assert.match(JSON.stringify(result.structuredContent), /"success":false.*includeDomains requires provider exa; resolved provider was brave/);
 		});
 	});
 });
@@ -634,7 +641,91 @@ test("search execution reports API and JSON failures without leaking key", async
 						return true;
 					},
 				);
+				const result = await executeRegisteredTool(tool, harness.ctx, { query: "rate limit", count: 1 });
+				assert.equal(result.isError, true);
+				assert.match(JSON.stringify(result.structuredContent), /"success":false.*Brave search rate limit exceeded/);
+				assert.doesNotMatch(JSON.stringify(result), /secret-that-must-not-leak/);
 			});
 		}
+		await withFakeFetch(() => new Response("invalid JSON", { status: 200 }), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "bad JSON", count: 1 });
+			assert.equal(result.isError, true);
+			assert.equal((result.structuredContent as { success: boolean }).success, false);
+		});
+		const controller = new AbortController();
+		controller.abort(new Error("cancelled search"));
+		await withFakeFetch(() => assert.fail("aborted tool must not fetch"), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "cancelled", count: 1 }, controller.signal);
+			assert.equal(result.isError, true);
+			assert.equal(result.details?.failureCategory, "aborted");
+			assert.match(JSON.stringify(result.structuredContent), /"success":false/);
+		});
+	});
+});
+
+test("large search results keep formatted prose inline and compact only the structured observation", async () => {
+	const fixture = await createFixture();
+	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: fixture.overrideConfigPath, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: "exa-secret" }, async () => {
+		const harness = createExtensionHarness({ cwd: fixture.cwd });
+		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
+		assert.ok(tool);
+		const capTitle = "T".repeat(180);
+		const capHighlight = "H".repeat(320);
+		const results = Array.from({ length: 10 }, (_unused, index) => ({
+			title: capTitle,
+			url: `https://example.com/result-${index + 1}`,
+			author: "Example",
+			publishedDate: "2026-01-01",
+			highlights: [capHighlight, capHighlight, capHighlight],
+		}));
+		await withFakeFetch(() => new Response(JSON.stringify({ requestId: "req-large", results }), { status: 200 }), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "large caps", count: 10 });
+			const text = result.content[0]?.text ?? "";
+			assert.match(text, /Exa web search results for: large caps/);
+			assert.ok(text.includes(`10. ${capTitle}`), "last capped result must stay inline");
+			assert.doesNotMatch(text, /Browser observation compacted/);
+			const structured = result.structuredContent as { compacted?: boolean; observationPath?: string };
+			assert.equal(structured.compacted, true);
+			assert.equal(typeof structured.observationPath, "string");
+			const spill = JSON.parse(await readFile(structured.observationPath as string, "utf8")) as { data: { results: unknown[] } };
+			assert.equal(spill.data.results.length, 10);
+			assert.equal((result.details as { results?: unknown[] }).results?.length, 10);
+			const manifest = (result.details as { artifactManifest?: { entries?: Array<{ path?: string; storageScope?: string; retentionState?: string }> } }).artifactManifest;
+			const spillEntry = manifest?.entries?.find(entry => entry.path === structured.observationPath);
+			assert.ok(spillEntry, "oversized search spill keeps its invocation artifact receipt in details");
+			assert.equal(spillEntry.storageScope, "process-temp");
+			assert.equal(spillEntry.retentionState, "ephemeral");
+			assert.doesNotMatch(JSON.stringify(result), /exa-secret/);
+		});
+	});
+});
+
+test("local validation failures report validation-error while provider failures stay upstream-error", async () => {
+	const fixture = await createFixture();
+	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: fixture.overrideConfigPath, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: "exa-secret" }, async () => {
+		const harness = createExtensionHarness({ cwd: fixture.cwd });
+		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
+		assert.ok(tool);
+		await withFakeFetch(() => assert.fail("blank query must not fetch"), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "   " });
+			assert.equal(result.isError, true);
+			assert.equal(result.details?.failureCategory, "validation-error");
+			assert.match(JSON.stringify(result.structuredContent), /"failureCategory":"validation-error"/);
+		});
+		await withFakeFetch(() => new Response("internal provider error", { status: 500 }), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "provider down", count: 1 });
+			assert.equal(result.isError, true);
+			assert.equal(result.details?.failureCategory, "upstream-error");
+		});
+	});
+	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: fixture.overrideConfigPath, [BRAVE_API_KEY_ENV]: "brave-secret", [EXA_API_KEY_ENV]: undefined }, async () => {
+		const harness = createExtensionHarness({ cwd: fixture.cwd });
+		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
+		assert.ok(tool);
+		await withFakeFetch(() => assert.fail("exa-only filters must fail before a Brave request"), async () => {
+			const result = await executeRegisteredTool(tool, harness.ctx, { query: "exa filters", includeDomains: ["example.com"] });
+			assert.equal(result.isError, true);
+			assert.equal(result.details?.failureCategory, "validation-error");
+		});
 	});
 });

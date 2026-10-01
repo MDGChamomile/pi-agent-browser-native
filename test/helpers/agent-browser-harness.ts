@@ -422,6 +422,8 @@ export interface AgentBrowserToolRenderContext {
 export type RegisteredTool = {
 	description: string;
 	parameters: TSchema;
+	outputSchema?: ToolDefinition["outputSchema"];
+	namespace?: ToolDefinition["namespace"];
 	execute: (
 		toolCallId: string,
 		params: unknown,
@@ -449,6 +451,8 @@ function adaptRegisteredTool<TParams extends TSchema, TDetails, TState>(
 
 	return {
 		description: tool.description,
+		outputSchema: tool.outputSchema,
+		namespace: tool.namespace,
 		execute: (toolCallId, params, signal, onUpdate, ctx) => {
 			type ExecuteArgs = Parameters<typeof tool.execute>;
 			return tool.execute(
@@ -638,6 +642,7 @@ export async function executeRegisteredTool(
 		content: Array<{ type: string; text?: string }>;
 		details?: Record<string, unknown>;
 		isError?: boolean;
+		structuredContent?: AgentToolResult<unknown>["structuredContent"];
 	};
 }
 

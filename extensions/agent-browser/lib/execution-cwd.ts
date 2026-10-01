@@ -2,8 +2,6 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SourceInfo } from "@earendil-works/pi-coding-agent";
 import { isRecord } from "./parsing.js";
-import { getBrowserResultMessage } from "./browser-transcript.js";
-import { getAgentBrowserSessionIdentityKey } from "./argv-grammar.js";
 
 function isDirectoryOwner(source: SourceInfo): boolean {
 	if (/^(?:npm:pi-change-working-dir|git:github\.com\/fitchmultz\/pi-change-working-dir(?:\.git)?)(?:@.+)?$/.test(source.source)) return true;
@@ -40,16 +38,4 @@ export function getBrowserCwdError(cwd: string): string | undefined {
 		if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
 	}
 	return `Browser launch directory is unavailable: ${cwd}. Restore that directory, or explicitly use sessionMode: "fresh" without --session, or --config from the selected execution directory. The existing browser was left untouched.`;
-}
-
-export function restoreManagedSessionCwd(branch: unknown[], sessionName: string, namespace: string | undefined, fallback: string): string {
-	const key = getAgentBrowserSessionIdentityKey(sessionName, namespace);
-	for (const entry of [...branch].reverse()) {
-		const message = getBrowserResultMessage(entry);
-		if (!message) continue;
-		const details = message.details;
-		if (!isRecord(details) || typeof details.sessionName !== "string" || typeof details.managedSessionCwd !== "string" || !isAbsolute(details.managedSessionCwd)) continue;
-		if (getAgentBrowserSessionIdentityKey(details.sessionName, typeof details.namespace === "string" ? details.namespace : undefined) === key) return details.managedSessionCwd;
-	}
-	return fallback;
 }

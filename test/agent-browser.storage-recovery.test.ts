@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { BROWSER_TRANSITION_ENTRY, getBrowserRecord, applyArtifactChanges } from "../extensions/agent-browser/lib/browser-transcript.js";
 import { appendBrowserRecord, captureBrowserBranch, projectJson, readBrowserEntries } from "../extensions/agent-browser/lib/browser-journal.js";
@@ -24,7 +24,7 @@ async function records(file: string): Promise<Array<Record<string, unknown>>> {
 	return (await readFile(file, "utf8")).trim().split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
 }
 
-for (const nativeMetadata of [false, true]) test(`published replay retains its captured branch while a new leaf is appended (${nativeMetadata ? "native metadata" : "official APIs"})`, async () => {
+test("published replay retains its captured branch while a new leaf is appended", async () => {
 	const root = await mkdtemp(join(tmpdir(), "piab-replay-boundary-"));
 	try {
 		const file = join(root, "session.jsonl");
@@ -45,11 +45,7 @@ for (const nativeMetadata of [false, true]) test(`published replay retains its c
 				appended = true;
 			}
 			return header;
-		}, ...(nativeMetadata ? {
-			*iterateEntryMetadata({ branchFrom }: { branchFrom?: string | null } = {}) {
-				for (const item of [before, after]) if (branchFrom === undefined || item.id === branchFrom) yield { id: item.id, parentId: item.parentId };
-			},
-		} : {}) } as unknown as ExtensionContext["sessionManager"];
+		} } as unknown as ExtensionContext["sessionManager"];
 		const first = await readBrowserEntries(selected);
 		assert.equal(appended, true, "the fixture must reach the concurrent publication window");
 		assert.equal(SessionPageState.fromBranch(first).get("shared").tabTarget?.url, "https://fixture.test/before");
@@ -69,10 +65,14 @@ test("native branch admission permits descendants and siblings without reading b
 		["sibling", { id: "sibling", parentId: "a" }], ["b", { id: "b", parentId: null }],
 	]);
 	for (const entry of entries.values()) Object.defineProperty(entry, "data", { get() { throw new Error("Admission must not hydrate bodies."); } });
-	let leaf: string | null = "a", sessionId = "fixture";
+	let leaf: string | null = "a", sessionId = "fixture", generationCurrent = true;
 	const native = { getSessionId: () => sessionId, getLeafId: () => leaf, getEntry: (id: string) => entries.get(id),
 		getSessionFile: () => undefined, getEntries() { throw new Error("No eager physical scan."); }, getBranch() { throw new Error("No eager branch scan."); } } as unknown as ExtensionContext["sessionManager"];
-	const branch = captureBrowserBranch(native, () => true);
+	const branch = captureBrowserBranch(native, () => generationCurrent);
+	assert.equal(branch.isCurrent(), true);
+	generationCurrent = false;
+	assert.equal(branch.isCurrent(), false, "a validated prefix cannot outlive its captured generation");
+	generationCurrent = true;
 	leaf = "first";
 	assert.equal(branch.isCurrent(), true);
 	leaf = "sibling";
@@ -96,6 +96,94 @@ test("native branch admission permits descendants and siblings without reading b
 	assert.equal(await appendBrowserRecord(native, () => { leaf = "a"; }, record, empty), true, "an empty in-memory branch advances only from its own synchronous append");
 	leaf = "sibling";
 	assert.equal(empty.isCurrent(), true);
+});
+
+test("captured admission validates its prefix once and bounds subsequent work by the appended suffix", () => {
+	const entries = new Map(Array.from({ length: 781 }, (_, index) => {
+		const id = `e${index}`;
+		return [id, { id, parentId: index ? `e${index - 1}` : null }] as const;
+	}));
+	let leaf = "e780", reads = 0;
+	const native = { getSessionId: () => "fixture", getLeafId: () => leaf, getSessionFile: () => undefined,
+		getEntry(id: string) { reads += 1; return entries.get(id); },
+	} as unknown as ExtensionContext["sessionManager"];
+	const branch = captureBrowserBranch(native, () => true);
+	assert.equal(branch.isCurrent(), true);
+	assert.ok(reads >= 781, "even leaf === anchor must validate the complete initial prefix");
+	reads = 0;
+	for (let index = 0; index < 20; index++) assert.equal(branch.isCurrent(), true);
+	assert.ok(reads <= 40, `unchanged selection repeatedly traversed the prefix (${reads} indexed reads)`);
+	reads = 0;
+	for (let index = 0; index < 20; index++) {
+		const id = `append${index}`;
+		entries.set(id, { id, parentId: leaf });
+		leaf = id;
+		assert.equal(branch.isCurrent(), true);
+	}
+	assert.ok(reads <= 80, `ordinary appends repeatedly traversed validated history (${reads} indexed reads)`);
+	entries.set("sibling", { id: "sibling", parentId: "e780" });
+	leaf = "sibling";
+	assert.equal(branch.isCurrent(), true, "cached descendants do not narrow the original anchor");
+	// A native reseed can reuse IDs but replaces indexed entry objects.
+	entries.set("sibling", { id: "sibling", parentId: "missing" });
+	assert.throws(() => branch.isCurrent(), /ancestry/);
+});
+
+test("equal-leaf admission does not bypass malformed, missing or cyclic captured prefixes", () => {
+	for (const entries of [
+		new Map([["anchor", { id: "anchor", parentId: "missing" }]]),
+		new Map([["anchor", { id: "anchor", parentId: "parent" }], ["parent", { id: "parent", parentId: "anchor" }]]),
+		new Map([["anchor", { id: "wrong-id", parentId: null }]]),
+		new Map([["anchor", { id: "anchor", parentId: 7 }]]),
+	]) {
+		const native = { getSessionId: () => "fixture", getLeafId: () => "anchor", getSessionFile: () => undefined,
+			getEntry: (id: string) => entries.get(id),
+		} as unknown as ExtensionContext["sessionManager"];
+		const branch = captureBrowserBranch(native, () => true);
+		assert.throws(() => branch.isCurrent(), /ancestry/);
+		assert.throws(() => branch.isCurrent(), /ancestry/, "failed validation cannot certify a prefix");
+	}
+});
+
+for (const change of ["locator", "replace", "truncate"] as const) test(`native ${change} renews captured admission with the same session identity`, async () => {
+	const root = await mkdtemp(join(tmpdir(), "piab-admission-reseed-"));
+	try {
+		const file = join(root, "session.jsonl"), replacement = join(root, "replacement.jsonl");
+		const header = { type: "session", version: 3, id: "fixture-session", cwd: root, timestamp: "2026-10-01T00:00:00.000Z" };
+		const entry = (id: string, parentId: string | null) => ({ type: "custom", customType: "fixture", id, parentId, timestamp: header.timestamp, data: {} });
+		const bytes = (rows: unknown[]) => rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+		await writeFile(file, bytes([header, entry("root", null), entry("anchor", "root")]));
+		const native = SessionManager.open(file, root);
+		const branch = captureBrowserBranch(native, () => true);
+		assert.equal(branch.isCurrent(), true);
+		assert.equal(branch.isCurrent(), true);
+		await writeFile(replacement, bytes(change === "truncate" ? [header] : [header, entry("root", "missing"), entry("anchor", "root")]));
+		if (change === "locator") native.setSessionFile(replacement);
+		else {
+			renameSync(replacement, file);
+			native.setSessionFile(file);
+		}
+		assert.equal(native.getSessionId(), branch.sessionId, "the native reseed retains the UUID, not its indexed objects");
+		if (change === "truncate") assert.equal(branch.isCurrent(), false, "the selected entry has been withdrawn");
+		else assert.throws(() => branch.isCurrent(), /ancestry/, "equal entry IDs cannot certify a replacement prefix");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const change of ["replace", "truncate"] as const) test(`published replay still rejects journal ${change} after capturing its selected prefix`, async () => {
+	const root = await mkdtemp(join(tmpdir(), "piab-replay-replacement-"));
+	try {
+		const file = join(root, "session.jsonl");
+		const header = { type: "session", id: "fixture-session" };
+		await writeFile(file, `${JSON.stringify(header)}\n${JSON.stringify({ type: "label", id: "anchor", parentId: null })}\n`);
+		const native = { ...manager(file, "anchor"), getHeader() {
+			if (change === "replace") {
+				writeFileSync(`${file}.replacement`, `${JSON.stringify(header)}\n`);
+				renameSync(`${file}.replacement`, file);
+			} else writeFileSync(file, `${JSON.stringify(header)}\n`);
+			return header;
+		} } as unknown as ExtensionContext["sessionManager"];
+		await assert.rejects(readBrowserEntries(native), /replaced or truncated/, "native ancestry is not a durable file receipt");
+	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
 for (const earlierHandler of [false, true]) for (const boundary of ["begin", "finish", "observation", "host-finish"] as const) test(`branch selection during ${boundary} journal preparation cannot publish old state onto B (${earlierHandler ? "earlier awaited handler" : "immediate event"})`, { concurrency: false, timeout: 30_000 }, async () => {
@@ -415,21 +503,6 @@ test("conversion preserves all original ancestry, interrupted prefixes, snapshot
 			assert.equal(recent?.entries[0].path, row.path);
 			assert.equal(recent?.entries[0].retentionState, leaf === "branch-b" || leaf === "label-b" ? "missing" : "live");
 		}
-		const nativeReads: string[] = [];
-		const nativeManager = { ...manager(destination, "result"),
-			getEntryMetadata: (id: string) => ({ id }),
-			*iterateEntryMetadata() {
-				for (const [id, parentId] of [["capture", null], ["begin", "capture"], ["finish", "begin"], ["result", "finish"]]) yield { id, parentId };
-			},
-			getEntry(id: string) {
-				nativeReads.push(id);
-				assert.equal(id, "capture", "the optional native adapter loads only the winning ancestral snapshot");
-				return converted.find(entry => entry.id === id);
-			},
-		} as unknown as ExtensionContext["sessionManager"];
-		const nativeBranch = await readBrowserEntries(nativeManager);
-		assert.deepEqual(nativeReads, ["capture"]);
-		assert.deepEqual(SessionPageState.fromBranch(nativeBranch).get("shared").refSnapshot?.refIds, ["e1", "e2"]);
 		const result = converted.find(entry => entry.id === "result")!;
 		assert.deepEqual((result.message as { details: { data: object }; content: unknown }).details.data, { explicit: "caller data 🧪" });
 		assert.deepEqual((result.message as { content: unknown }).content, (originals.find(entry => entry.id === "result")! as { message: { content: unknown } }).message.content);

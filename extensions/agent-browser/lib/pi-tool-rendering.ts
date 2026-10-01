@@ -1,7 +1,6 @@
-import type { AgentToolResult, Theme, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, Theme } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, Text, truncateToWidth } from "@earendil-works/pi-tui";
 
-import { BROWSER_RESULT_TOOLS } from "./browser-transcript.js";
 import { compileAgentBrowserElectron } from "./input-modes/electron.js";
 import { compileAgentBrowserQaPreset } from "./input-modes/job.js";
 import { compileAgentBrowserNetworkSourceLookup, compileAgentBrowserSourceLookup } from "./input-modes/lookups.js";
@@ -198,15 +197,10 @@ function formatModelVisibleFailureCategoryNotice(details: unknown): string | und
 type AgentBrowserToolContent = AgentToolResult<unknown>["content"];
 type AgentBrowserToolContentItem = AgentBrowserToolContent[number];
 
-export type AgentBrowserToolResultPatch = {
-	content?: AgentBrowserToolContent;
-	isError?: boolean;
-};
-
-function agentBrowserToolResultRequestedJson(event: ToolResultEvent): boolean {
-	const details = isRecord(event.details) ? event.details : undefined;
+function agentBrowserToolResultRequestedJson(result: AgentToolResult<unknown>, input: unknown): boolean {
+	const details = isRecord(result.details) ? result.details : undefined;
 	const detailArgs = Array.isArray(details?.args) ? details.args : undefined;
-	const inputArgs = isRecord(event.input) && Array.isArray(event.input.args) ? event.input.args : undefined;
+	const inputArgs = isRecord(input) && Array.isArray(input.args) ? input.args : undefined;
 	return detailArgs?.includes("--json") === true || inputArgs?.includes("--json") === true;
 }
 
@@ -235,26 +229,44 @@ function appendModelVisibleFailureCategoryNotice(content: AgentBrowserToolConten
 		: item);
 }
 
-export function buildAgentBrowserToolResultPatch(event: ToolResultEvent): AgentBrowserToolResultPatch | undefined {
-	if (!BROWSER_RESULT_TOOLS.has(event.toolName)) return undefined;
-	const preservesParseableJson = (event.toolName === "agent_browser_code" || agentBrowserToolResultRequestedJson(event)) && agentBrowserToolResultHasParseableJsonContent(event.content);
-	const notice = preservesParseableJson ? undefined : formatModelVisibleFailureCategoryNotice(event.details);
-	const content = notice ? appendModelVisibleFailureCategoryNotice(event.content, notice) : undefined;
-	const shouldMarkError = isRecord(event.details) && event.details.resultCategory === "failure" && event.isError !== true;
-	if (!shouldMarkError && !content) return undefined;
+export function finalizeAgentBrowserFailure<T extends AgentToolResult<unknown>>(result: T, input: unknown): T {
+	const failed = result.isError === true || (isRecord(result.details) && result.details.resultCategory === "failure");
+	const preservesParseableJson = (isRecord(input) && "code" in input || agentBrowserToolResultRequestedJson(result, input)) && agentBrowserToolResultHasParseableJsonContent(result.content);
+	const notice = preservesParseableJson ? undefined : formatModelVisibleFailureCategoryNotice(result.details);
+	const content = notice ? appendModelVisibleFailureCategoryNotice(result.content, notice) : undefined;
 	return {
-		...(content ? { content } : {}),
-		...(shouldMarkError ? { isError: true } : {}),
+		...result,
+		content: content ?? result.content,
+		isError: failed,
 	};
 }
+
 
 export class AgentBrowserResultComponent {
 	private expanded = false;
 	private theme: Theme | undefined;
 	private readonly text = new Text("", 0, 0);
+	private value: string | undefined;
+	private formatKey: unknown[] | undefined;
+
+	setResult(result: AgentToolResult<unknown>, options: { expanded: boolean; isPartial: boolean }, theme: Theme, isError: boolean): void {
+		const details = isRecord(result.details) ? result.details : undefined;
+		// Theme is a stable proxy in Pi; its resolved colors identify theme/terminal-color changes.
+		const key = [getPrimaryTextContent(result), details?.summary, details?.resultCategory, details?.failureCategory, options.isPartial, isError, theme, theme.colors, theme.fg];
+		if (!this.formatKey || key.some((value, index) => value !== this.formatKey![index])) {
+			this.formatKey = key;
+			this.setState(formatAgentBrowserRenderResult(result, options, theme, isError), options.expanded, theme);
+		} else {
+			this.expanded = options.expanded;
+			this.theme = theme;
+		}
+	}
 
 	setState(value: string, expanded: boolean, theme: Theme): void {
-		this.text.setText(value);
+		if (value !== this.value) {
+			this.text.setText(value);
+			this.value = value;
+		}
 		this.expanded = expanded;
 		this.theme = theme;
 	}

@@ -1,7 +1,8 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { formatAgentBrowserRenderCall } from "./pi-tool-rendering.js";
-import type { TUnsafe } from "./json-schema.js";
+import { JsonSchema, type TUnsafe } from "./json-schema.js";
+import { AGENT_BROWSER_NAMESPACE, AGENT_BROWSER_OUTPUT_SCHEMA, finalizeAgentBrowserNativeResult } from "./native-output.js";
 import {
 	AGENT_BROWSER_PARAMS,
 	AGENT_BROWSER_CODE_PARAMS,
@@ -44,24 +45,30 @@ const advancedNames = new Set<string>(Object.values(AGENT_BROWSER_TOOL_INVENTORY
 
 /** Register once; advanced calls adapt only their input shape and reuse the ordinary executor. */
 export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: AgentBrowserToolSurfaceOptions): void {
+	const execute: AgentBrowserExecutor = async (id, params, signal, onUpdate, ctx) =>
+		finalizeAgentBrowserNativeResult(await options.execute(id, params, signal, onUpdate, ctx), params);
+	const nativeOutput = { namespace: AGENT_BROWSER_NAMESPACE, outputSchema: AGENT_BROWSER_OUTPUT_SCHEMA };
 	pi.registerTool({
 		name: "agent_browser",
+		...nativeOutput,
 		label: "Agent Browser",
 		description: "Browse and interact through native agent-browser commands. One command in args; fixed sequences use batch --bail and JSON-array stdin. Use agent_browser_code for loops/branches and agent_browser_tools for advanced capabilities.",
 		promptSnippet: "Browse pages, inspect current refs, interact, and run native command batches.",
 		parameters: AGENT_BROWSER_PARAMS,
 		renderCall: options.renderCall,
 		renderResult: options.renderResult,
-		execute: options.execute,
+		execute,
 		executionMode: options.executionMode,
 	});
 	pi.registerTool({
 		name: "agent_browser_code",
+		...nativeOutput,
 		label: "Agent Browser Code",
 		description: "Run fresh JavaScript against a persistent browser. await browser({args,stdin?,timeoutMs?}) returns success/data/error/nextActions and imageObservations; emit(selected JSON) and emitImage(image handle) explicitly choose output. No host APIs or imports. Use native batch for fixed sequences.",
 		promptSnippet: "Branch, loop, and aggregate browser observations with explicit JSON/image output.",
 		parameters: AGENT_BROWSER_CODE_PARAMS,
-		execute: options.executeCode,
+		execute: async (id, params, signal, onUpdate, ctx) =>
+			finalizeAgentBrowserNativeResult(await options.executeCode(id, params, signal, onUpdate, ctx), params),
 		executionMode: options.executionMode,
 		renderCall(args, theme, context) {
 			const text = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
@@ -73,56 +80,74 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 
 	pi.registerTool({
 		...AGENT_BROWSER_TOOL_INVENTORY.action,
+		...nativeOutput,
+		defaultActive: false,
 		label: "Browser Action",
 		parameters: AGENT_BROWSER_ACTION_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
 		execute(id, { outputPath, timeoutMs, ...semanticAction }, signal, onUpdate, ctx) {
-			return options.execute(id, { semanticAction, outputPath, timeoutMs }, signal, onUpdate, ctx);
+			return execute(id, { semanticAction, outputPath, timeoutMs }, signal, onUpdate, ctx);
 		},
 	});
 	pi.registerTool({
 		...AGENT_BROWSER_TOOL_INVENTORY.qa,
+		...nativeOutput,
+		defaultActive: false,
 		label: "Browser QA",
 		parameters: AGENT_BROWSER_QA_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
 		execute(id, { outputPath, timeoutMs, sessionMode, ...qa }, signal, onUpdate, ctx) {
-			return options.execute(id, { qa, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
+			return execute(id, { qa, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
 		},
 	});
 	pi.registerTool({
 		...AGENT_BROWSER_TOOL_INVENTORY.electron,
+		...nativeOutput,
+		defaultActive: false,
 		label: "Browser Electron",
 		parameters: AGENT_BROWSER_ELECTRON_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
 		execute(id, { outputPath, ...electron }, signal, onUpdate, ctx) {
-			return options.execute(id, { electron, outputPath }, signal, onUpdate, ctx);
+			return execute(id, { electron, outputPath }, signal, onUpdate, ctx);
 		},
 	});
 	pi.registerTool({
 		...AGENT_BROWSER_TOOL_INVENTORY.source,
+		...nativeOutput,
+		defaultActive: false,
 		label: "Browser Source",
 		parameters: AGENT_BROWSER_SOURCE_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
 		execute(id, { outputPath, timeoutMs, sessionMode, ...sourceLookup }, signal, onUpdate, ctx) {
-			return options.execute(id, { sourceLookup, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
+			return execute(id, { sourceLookup, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
 		},
 	});
 	pi.registerTool({
 		...AGENT_BROWSER_TOOL_INVENTORY.network,
+		...nativeOutput,
+		defaultActive: false,
 		label: "Browser Network Source",
 		parameters: AGENT_BROWSER_NETWORK_SOURCE_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
 		execute(id, { outputPath, timeoutMs, sessionMode, ...networkSourceLookup }, signal, onUpdate, ctx) {
-			return options.execute(id, { networkSourceLookup, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
+			return execute(id, { networkSourceLookup, outputPath, timeoutMs, sessionMode }, signal, onUpdate, ctx);
 		},
 	});
 	pi.registerTool({
 		name: "agent_browser_tools",
+		namespace: AGENT_BROWSER_NAMESPACE,
+		outputSchema: JsonSchema.Object({
+			inventory: JsonSchema.Array(JsonSchema.Object({
+				key: JsonSchema.String(), name: JsonSchema.String(), description: JsonSchema.String(),
+				available: JsonSchema.Boolean(), active: JsonSchema.Boolean(),
+			})),
+			added: JsonSchema.Array(JsonSchema.String()),
+		}),
 		label: "Browser Tools",
 		description: "List or enable advanced browser tools: action → agent_browser_action; qa → agent_browser_qa; electron → agent_browser_electron; source → agent_browser_source; network → agent_browser_network_source. Omit enable for inventory. Activation only adds tools; it preserves other active tools.",
 		promptSnippet: "Discover and enable specialized browser actions, QA, Electron, and source tools.",
@@ -140,12 +165,14 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 			return {
 				content: [{ type: "text", text: inventory.map((tool) => `${tool.key}: ${tool.name} (${!tool.available ? "unavailable in this Pi tool selection" : tool.active ? "active" : "inactive"}) — ${tool.description}`).join("\n") }],
 				details: { inventory, added: [...new Set(added)] },
+				structuredContent: { inventory, added: [...new Set(added)] },
 			};
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Pi owns selected tools and their durable system-message history; keep no parallel registry.
+		// ponytail: official 1.0 SDK supplies initialActiveToolNames on resume, bypassing
+		// native transcript restoration. Remove this additive fallback once the supported SDK restores it.
 		const argv = process.argv.slice(2);
 		const delimiter = argv.indexOf("--");
 		if ((delimiter < 0 ? argv : argv.slice(0, delimiter)).some((arg) => arg === "--tools" || arg === "-t")) return;
@@ -153,14 +180,15 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		const available = new Set(pi.getAllTools().map(({ name }) => name));
 		if (!["agent_browser", "agent_browser_code", "agent_browser_tools", ...advancedNames].every(name => available.has(name))) return;
 		// Native dynamic imports bypass Pi's host-package aliases in consumer installs.
-		// Only tool names are needed; replay their native deltas without a host import.
+		// Only tool names are needed; replay native deltas without requiring the optional pi-ai peer.
 		const restored = new Set<string>();
 		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
 			if (message.role !== "system") continue;
 			for (const removed of message.toolsRemoved ?? []) restored.delete(removed.name);
 			for (const added of message.toolsAdded ?? []) restored.add(added.name);
 		}
-		const active = pi.getActiveTools().filter((name) => !advancedNames.has(name) || restored.has(name));
-		pi.setActiveTools([...new Set([...active, ...[...restored].filter((name) => advancedNames.has(name) && available.has(name))])]);
+		const active = new Set(pi.getActiveTools());
+		const added = [...restored].filter((name) => advancedNames.has(name) && available.has(name) && !active.has(name));
+		if (added.length > 0) pi.setActiveTools([...active, ...added]);
 	});
 }

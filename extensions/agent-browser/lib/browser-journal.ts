@@ -206,15 +206,7 @@ export async function readBrowserEntries(manager: ReadonlySessionManager, physic
 		const metadata = await scanJournalMetadata(file, captured.size);
 		const header = metadata.find(entry => entry.value.type === "session");
 		if (header?.value.id !== (manager.getHeader()?.id ?? manager.getSessionId())) throw new Error("Pi session journal identity does not match the active session.");
-		const publicManager = manager as Omit<ReadonlySessionManager, "getEntryMetadata" | "iterateEntryMetadata"> & {
-			getEntryMetadata?: (id: string) => unknown;
-			iterateEntryMetadata?: (options?: { branchFrom?: string | null }) => Iterable<{ id: string; parentId: string | null }>;
-		};
 		const selected = physical ? metadata.filter(entry => entry.value.type !== "session") : branchEntries(metadata.filter(entry => entry.value.type !== "session"), leaf);
-		if (publicManager.iterateEntryMetadata) {
-			const native = new Map([...publicManager.iterateEntryMetadata(physical ? {} : { branchFrom: leaf })].map(entry => [entry.id, entry.parentId]));
-			for (const entry of selected) if (typeof entry.value.id !== "string" || native.get(entry.value.id) !== entry.value.parentId) throw new Error("Published browser journal ancestry differs from the native selected boundary.");
-		}
 		const projected: unknown[] = [];
 		const definitions = new Map<string, JournalEntry>();
 		for (const entry of selected) {
@@ -248,9 +240,7 @@ export async function readBrowserEntries(manager: ReadonlySessionManager, physic
 			if (!entry) throw new Error(`Browser snapshot ${id} has no ancestral definition; inspect and take a fresh snapshot.`);
 			// ponytail: a requested individual snapshot must fit its consumer's memory. Metadata
 			// scans skip unlimited unrelated values; upgrade with native per-value paging if needed.
-			const native = publicManager.getEntryMetadata && typeof entry.value.id === "string" ? manager.getEntry(entry.value.id) : undefined;
-			const body = native && isRecord(native) && isRecord(native.data) ? { data: native.data }
-				: await projectJson(readRange(file, entry), [["data", "snapshot"]], Infinity);
+			const body = await projectJson(readRange(file, entry), [["data", "snapshot"]], Infinity);
 			const destination = projected.find(candidate => isRecord(candidate) && candidate.id === entry.value.id);
 			if (!isRecord(destination) || !isRecord(destination.data) || !isRecord(body?.data)) throw new Error("Winning browser snapshot could not be read.");
 			destination.data.snapshot = body.data.snapshot;
@@ -295,19 +285,48 @@ export interface BrowserBranch {
 /** Capture before waiting: native selection precedes sequential session_tree handlers. */
 export function captureBrowserBranch(manager: ReadonlySessionManager, isGenerationCurrent: () => boolean): BrowserBranch {
 	const sessionId = manager.getSessionId();
-	const branch: BrowserBranch = { sessionId, anchorId: manager.getLeafId(), isCurrent() {
+	type Endpoint = { entry: NonNullable<ReturnType<ReadonlySessionManager["getEntry"]>>; parentId: string | null };
+	let anchorId = manager.getLeafId();
+	let validatedAnchor: Endpoint | undefined;
+	let validatedLeaf: Endpoint | undefined;
+	const branch: BrowserBranch = { sessionId, anchorId, isCurrent() {
 		if (!isGenerationCurrent() || manager.getSessionId() !== sessionId) return false;
+		if (branch.anchorId !== anchorId) {
+			validatedAnchor = validatedLeaf = undefined;
+			anchorId = branch.anchorId;
+		}
 		let leaf = manager.getLeafId();
 		// Empty selection is not a universal ancestor of other independent roots.
 		let current = branch.anchorId === null && leaf === null;
 		const seen = new Set<string>();
+		let selected: Endpoint | undefined;
+		let anchor: Endpoint | undefined;
 		while (leaf !== null) {
 			if (typeof leaf !== "string" || seen.has(leaf)) throw new Error("Selected Pi journal ancestry is invalid or cyclic.");
 			seen.add(leaf);
 			const entry = manager.getEntry(leaf);
 			if (!entry || entry.id !== leaf || entry.parentId !== null && typeof entry.parentId !== "string") throw new Error("Selected Pi journal ancestry is incomplete.");
-			if (leaf === branch.anchorId) current = true;
+			selected ??= { entry, parentId: entry.parentId };
+			const cached = leaf === branch.anchorId ? validatedAnchor : leaf === validatedLeaf?.entry.id ? validatedLeaf : undefined;
+			if (cached) {
+				// Keep the native indexed lookup: it also refreshes fork journal identity.
+				if (cached.entry === entry && cached.parentId === entry.parentId) { current = true; break; }
+				validatedAnchor = validatedLeaf = undefined;
+			}
+			if (leaf === branch.anchorId) {
+				current = true;
+				anchor = { entry, parentId: entry.parentId };
+			}
 			leaf = entry.parentId;
+		}
+		// Native entries/parents are append-only. Cache only after validating through
+		// the root (or an already validated endpoint), never merely on leaf === anchor.
+		// ponytail: behind-host mutation of an old ancestor without native reseed or
+		// generation change is outside this contract; durable file proofs
+		// remain in replay/append. Upgrade if Pi exposes a separate ancestry revision.
+		if (current && selected) {
+			validatedAnchor = anchor ?? validatedAnchor;
+			validatedLeaf = selected;
 		}
 		return current;
 	} };
