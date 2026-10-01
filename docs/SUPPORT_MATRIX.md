@@ -33,7 +33,7 @@ The compact direct/code/loader surface replaces public multimode inputs while re
 | Area | Contract and verification target |
 | --- | --- |
 | RQ-0064 fixed workflows | Public job DSL removed; native `batch --bail` preserves fixed ordering, waits, explicit assertions, paced keyboard/wait rows, and timeout partial progress. Code handles branches/loops. |
-| RQ-0065 QA | Flat `agent_browser_qa` preserves visible assertions, attached-buffer scope, diagnostic residue ambiguity, actionable/benign classification, and actual pass/fail. |
+| RQ-0065 QA | Flat `agent_browser_qa` preserves visible assertions, attached-buffer scope, diagnostic residue ambiguity, actionable/benign classification, and actual pass/fail. Fail-fast receipts separate failed checks from later `notRunChecks`; incomplete/timeout evidence stays unverified and execution counts without receipts remain unknown. |
 | RQ-0066 / RQ-0067 source | Flat source/network tools retain bounded host scans and candidates-only semantics even in browser-only hosts. |
 | RQ-0068 recipes | No recipe registry, persistent JavaScript, second driver, or interpreter dependency. |
 | RQ-0096 Electron | Flat lifecycle tool preserves app/process/profile ownership and cancellation; native browser/code operations reuse its returned session. |

@@ -864,13 +864,14 @@ export async function processBrowserOutput(input: ProcessBrowserOutputInput): Pr
 			presentation.failureCategory = "qa-failure";
 			presentation.summary = qaPreset.summary;
 			const compactText = buildQaCompactFailureText({
-				batchStepCount: presentation.batchSteps?.length ?? prepared.compiledQaPreset.steps.length,
-				checks: prepared.compiledQaPreset.checks,
+				causalError: presentation.batchFailure?.failedStep.text,
+				executedStepCount: presentation.batchSteps?.length,
 				page: extractQaPageContext({
 					attachedTarget: qaAttachedTarget,
 					batchData: presentationEnvelope?.data,
 					compiled: prepared.compiledQaPreset,
 				}),
+				plannedStepCount: prepared.compiledQaPreset.steps.length,
 				qaPreset,
 			});
 			const nonTextContent = presentation.content.filter((item) => item.type !== "text");
@@ -897,7 +898,12 @@ export async function processBrowserOutput(input: ProcessBrowserOutputInput): Pr
 			: undefined;
 		const qaAttachedBannerText = [qaAttachedTargetText, qaAttachedDiagnosticsText].filter((part): part is string => typeof part === "string" && part.length > 0).join("\n");
 		const skipAttachedTargetBanner = qaPreset?.passed && prepared.compiledQaPreset?.checks.attached;
-		if (!skipAttachedTargetBanner && qaAttachedBannerText && presentation.content[0]?.type === "text") presentation.content[0] = { ...presentation.content[0], text: `${qaAttachedBannerText}\n\n${presentation.content[0].text}` };
+		if (!skipAttachedTargetBanner && qaAttachedBannerText && presentation.content[0]?.type === "text") presentation.content[0] = {
+			...presentation.content[0],
+			text: qaPreset?.passed === false
+				? `${presentation.content[0].text}\n\n${qaAttachedBannerText}`
+				: `${qaAttachedBannerText}\n\n${presentation.content[0].text}`,
+		};
 		else if (!skipAttachedTargetBanner && qaAttachedBannerText) presentation.content.unshift({ type: "text", text: qaAttachedBannerText });
 		if (managedSessionOutcome && managedSessionOutcome.succeeded !== succeeded) managedSessionOutcome = { ...managedSessionOutcome, succeeded };
 		const evalNavigationSummary = navigationSummary ?? extractNavigationSummaryFromData(presentationEnvelope?.data);

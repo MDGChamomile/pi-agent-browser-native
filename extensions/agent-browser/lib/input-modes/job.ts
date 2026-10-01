@@ -1,6 +1,7 @@
 import type { ArtifactVerificationSummary } from "../results/contracts.js";
 import { isRecord } from "../parsing.js";
 import { summarizeNetworkFailures } from "../results/network.js";
+import { truncateText } from "../results/text.js";
 import { getBatchResultItems, getCommandNameFromBatchItem } from "./shared.js";
 import {
 	AGENT_BROWSER_QA_LOAD_STATES,
@@ -71,17 +72,21 @@ export function buildQaCompactPassText(options: {
 }
 
 export function buildQaCompactFailureText(options: {
-	batchStepCount: number;
-	checks: CompiledAgentBrowserQaPreset["checks"];
+	causalError?: string;
+	executedStepCount?: number;
 	page?: { title?: string; url?: string };
+	plannedStepCount: number;
 	qaPreset: AgentBrowserQaPresetAnalysis;
 }): string {
-	const lines = [options.qaPreset.summary];
+	const lines = [options.causalError
+		? truncateText(options.causalError.replace(/\s+/g, " ").trim(), 700)
+		: options.qaPreset.summary];
 	const pageParts = [options.page?.title, options.page?.url].filter((part): part is string => typeof part === "string" && part.length > 0);
 	if (pageParts.length > 0) lines.push(`Page: ${pageParts.join(" — ")}`);
 	if (options.qaPreset.failedChecks.length > 0) lines.push("Failed checks:", ...options.qaPreset.failedChecks.map((failure) => `- ${failure}`));
+	if (options.qaPreset.notRunChecks.length > 0) lines.push("Not run:", ...options.qaPreset.notRunChecks.map((check) => `- ${check}`));
 	if (options.qaPreset.warnings.length > 0) lines.push("Warnings:", ...options.qaPreset.warnings.map((warning) => `- ${warning}`));
-	lines.push(`Checks run: ${describeQaChecksRun(options.checks)} (${options.batchStepCount} batch step${options.batchStepCount === 1 ? "" : "s"})`);
+	lines.push(`Execution: ${options.executedStepCount ?? "unknown"}/${options.plannedStepCount} batch steps`);
 	lines.push("Full diagnostic matrix: see details.qaPreset and details.batchSteps.");
 	return lines.join("\n");
 }
@@ -190,10 +195,37 @@ export function analyzeQaPresetTimeout(compiled: CompiledAgentBrowserQaPreset): 
 	const failedChecks = compiled.checks.expectedText.map((text) => `expected text was not verified before timeout: ${formatQaExpectedTextPreview(text)}`);
 	return {
 		failedChecks,
+		notRunChecks: [],
 		passed: false,
 		summary: `QA preset failed: ${failedChecks.join("; ")}.`,
 		warnings: ["The wrapper timed out before expected-text evidence could be verified; inspect timeoutPartialProgress and retry with a narrower readiness condition if the page was still loading."],
 	};
+}
+
+function describeNotRunQaChecks(compiled: CompiledAgentBrowserQaPreset, executedStepCount: number): string[] {
+	const checks: string[] = [];
+	let expectedTextIndex = 0;
+	for (const [index, step] of compiled.steps.entries()) {
+		let check: string | undefined;
+		if (step.action === "assertText") {
+			const expected = compiled.checks.expectedText[expectedTextIndex++];
+			if (expected) check = `expected text: ${formatQaExpectedTextPreview(expected)}`;
+		} else if (step.args[0] === "wait" && step.args[1] === "--load") {
+			check = `load state: ${step.args[2]}`;
+		} else if (compiled.checks.expectedSelector && step.args[0] === "wait" && step.args[1] === compiled.checks.expectedSelector) {
+			check = `expected selector: ${formatQaExpectedTextPreview(compiled.checks.expectedSelector)}`;
+		} else if (step.args[0] === "network" && !step.args.includes("--clear")) {
+			check = "network diagnostics";
+		} else if (step.args[0] === "console" && !step.args.includes("--clear")) {
+			check = "console diagnostics";
+		} else if (step.args[0] === "errors" && !step.args.includes("--clear") && step.generatedFrom !== "qa.errorBaselineAfterClear") {
+			check = "page error diagnostics";
+		} else if (step.action === "screenshot") {
+			check = `screenshot: ${formatQaExpectedTextPreview(step.args[1] ?? "")}`;
+		}
+		if (index >= executedStepCount && check) checks.push(check);
+	}
+	return checks;
 }
 
 export function analyzeQaPresetResults(data: unknown, compiled?: CompiledAgentBrowserQaPreset): AgentBrowserQaPresetAnalysis | undefined {
@@ -238,16 +270,22 @@ export function analyzeQaPresetResults(data: unknown, compiled?: CompiledAgentBr
 			if (step.action !== "assertText") return;
 			const expected = compiled.checks.expectedText[expectedTextIndex++];
 			if (!expected) return;
+			if (!items[index]) return;
 			const visibleTextPassed = qaVisibleTextWaitPassed(items[index], step);
 			if (visibleTextPassed === true) return;
 			const actual = extractQaTextAssertionResultText(items[index]);
 			if (!actual || !actual.includes(expected)) failedChecks.push(`expected text not found: ${formatQaExpectedTextPreview(expected)}`);
 		});
 	}
+	const stoppedEarly = compiled && items.length < compiled.steps.length;
+	const failedFast = stoppedEarly && items.at(-1)?.success === false;
+	if (stoppedEarly && !failedFast) failedChecks.push("QA execution could not be verified (incomplete batch results)");
 	const uniqueFailures = [...new Set(failedChecks)];
 	const uniqueWarnings = [...new Set(warnings)];
+	const notRunChecks = compiled && failedFast ? describeNotRunQaChecks(compiled, items.length) : [];
 	return {
 		failedChecks: uniqueFailures,
+		notRunChecks,
 		passed: uniqueFailures.length === 0,
 		summary: uniqueFailures.length === 0
 			? uniqueWarnings.length === 0 ? "QA preset passed." : `QA preset passed with warnings: ${uniqueWarnings.join("; ")}.`
