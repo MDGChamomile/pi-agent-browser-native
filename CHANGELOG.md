@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Persist small canonical browser begin/finish events, complete ref definitions once per capture, and artifact-row changes instead of repeating full state after ordinary commands. Tool results retain invocation receipts and dedicated capture/export data.
+- Replay selected journal envelopes and winning definitions through public Pi APIs with bounded token parsing on official and fork hosts. Stock official Pi's own eager loader remains a separate limitation.
+- Add `pi-agent-browser-convert` for validated offline separate-copy conversion of stopped legacy sessions, preserving original bytes, ancestry, explicit observations and source-owner cleanup facts.
+
+### Fixed
+
+- Restore extension startup in consumer installs by replaying native tool-name deltas without a dynamic host-package import (#210, #207).
+- Expose an object-rooted Electron tool schema for strict providers while preserving action-specific validation (#214).
+- Prevent dispatch after an unconfirmed begin, stop dependent code after an unconfirmed finish, and preserve observed native lifecycle effects through presentation/export failure.
+- Invalidate refs on changed or unverifiable native daemon generations, including same-URL replacement and helper captures. Restart reuses wrapper-owned launch provenance only after matching the native generation and restore key; ordinary forks cannot inherit parent Electron/script cleanup rights.
+
 ## 0.8.2 - 2026-09-27
 
 ### Added

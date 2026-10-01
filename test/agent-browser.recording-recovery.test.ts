@@ -8,6 +8,7 @@ import { recoverRecordingStop } from "../extensions/agent-browser/lib/orchestrat
 import { runAgentBrowserProcess } from "../extensions/agent-browser/lib/process.js";
 import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
 import type { SessionArtifactManifest } from "../extensions/agent-browser/lib/results/contracts.js";
+import { applyArtifactChanges, getBrowserRecord } from "../extensions/agent-browser/lib/browser-transcript.js";
 import { createExtensionHarness, createToolBranchEntry, executeRegisteredTool, readInvocationLog, runExtensionEvent, withPatchedEnv, writeFakeAgentBrowserBinary } from "./helpers/agent-browser-harness.js";
 
 async function withRecorder(mode: string, run: (options: {
@@ -36,7 +37,7 @@ function execute(row) {
   if (row[0] === 'get' && row[1] === 'text' && mode === 'mixed-failure') throw new Error('Unknown ref @e1');
   if (row[0] === 'snapshot') return { url: 'https://recording.test/', snapshot: '- button "Old button" [ref=e1]', refs: { e1: { role: 'button', name: 'Old button' } } };
   if (row[0] === 'session') return { session: 'recorder', namespace: mode === 'namespace-mismatch' ? 'other' : 'scope', active: true, pid: 123,
-    runtime: { recording: { current: state.current, last: state.last }, browser: { status: 'not-launched', alive: false, pid: null, userDataDir: null, ownership: 'none', tabs: [], error: null } } };
+    runtime: { backgroundPid: process.ppid, socketDir: 'recording-fixture', browserLaunched: true, restoreKey: null, recording: { current: state.current, last: state.last }, browser: { status: 'not-launched', alive: false, pid: null, userDataDir: null, ownership: 'none', tabs: [], error: null } } };
   if (row[0] === 'record' && row[1] === 'start') {
     const started = Date.now() - (mode === 'old-receipt' ? 60000 : 0);
     state.current = { recordingId: 'new-take', path: path.resolve(row[2]), success: null, error: null, frames: 60, capturedFrames: 2, fps: 30,
@@ -203,7 +204,14 @@ test("recording failure secrets stay redacted in retained public manifests", { c
 		for (const result of [stopped, followup]) {
 			assert.equal(JSON.stringify(result).includes("RECORDING_AUTH_SECRET"), false);
 			assert.equal(JSON.stringify(result).includes("RECORDING_STATE_SECRET"), false);
-			const artifact = (result.details?.artifactManifest as SessionArtifactManifest).entries.find(entry => entry.absolutePath === path);
+		}
+		assert.equal(followup.details?.artifactManifest, undefined, "an unrelated read does not copy recording history");
+		let retained: SessionArtifactManifest | undefined;
+		for (const entry of harness.ctx.sessionManager.getBranch()) retained = applyArtifactChanges(retained, getBrowserRecord(entry)?.event.artifacts);
+		for (const manifest of [stopped.details?.artifactManifest as SessionArtifactManifest, retained!]) {
+			assert.equal(JSON.stringify(manifest).includes("RECORDING_AUTH_SECRET"), false);
+			assert.equal(JSON.stringify(manifest).includes("RECORDING_STATE_SECRET"), false);
+			const artifact = manifest.entries.find(entry => entry.absolutePath === path);
 			assert.equal(artifact?.recording?.recordingId, "new-take");
 			assert.equal(artifact?.recording?.path, path);
 			assert.equal(artifact?.exists, true);

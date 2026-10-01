@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { convertBrowserEntries } from "../extensions/agent-browser/lib/browser-session-conversion.js";
 import { getAgentBrowserSessionIdentityKey } from "../extensions/agent-browser/lib/argv-grammar.js";
 import { batchHasSuccessfulCloseAll, getSuccessfulBatchCloseLifecycle } from "../extensions/agent-browser/lib/batch-lifecycle.js";
 import { shouldCaptureNavigationSummary } from "../extensions/agent-browser/lib/orchestration/browser-run/session-state.js";
@@ -25,6 +26,8 @@ import {
 	normalizeComparableUrl,
 	targetsMatch,
 } from "../extensions/agent-browser/lib/session-page-state.js";
+
+const restoreLegacyBranch = (entries: unknown[]) => SessionPageState.fromBranch(convertBrowserEntries(entries));
 
 function toolEntry(details: Record<string, unknown>, isError = false): unknown {
 	return {
@@ -91,7 +94,7 @@ test("SessionPageState.fromBranch restores tab targets, ref snapshots, invalidat
 	assert.equal(getAgentBrowserSessionIdentityKey("session", "Straße", "win32"), getAgentBrowserSessionIdentityKey("session", "STRASSE", "win32"));
 	assert.notEqual(getAgentBrowserSessionIdentityKey("Session", undefined, "linux"), getAgentBrowserSessionIdentityKey("session", undefined, "linux"));
 	assert.notEqual(getAgentBrowserSessionIdentityKey("session", "Straße", "linux"), getAgentBrowserSessionIdentityKey("session", "STRASSE", "linux"));
-	const state = SessionPageState.fromBranch([
+	const state = restoreLegacyBranch([
 		toolEntry({
 			command: "snapshot",
 			refSnapshot: { refIds: ["e1", "not-a-ref"], target: { title: "Example", url: "https://example.com/page#old" } },
@@ -106,7 +109,9 @@ test("SessionPageState.fromBranch restores tab targets, ref snapshots, invalidat
 	]);
 
 	const restoredSession = state.get("s1");
-	assert.deepEqual(restoredSession, {
+	assert.ok(restoredSession.refSnapshot?.snapshotId);
+	const { snapshotId: _id, ...restoredSnapshot } = restoredSession.refSnapshot!;
+	assert.deepEqual({ ...restoredSession, refSnapshot: restoredSnapshot }, {
 		pinningReason: "restore",
 		refSnapshot: { refIds: ["e1"], target: { title: "Example", url: "https://example.com/page#old" } },
 		refSnapshotInvalidation: undefined,
@@ -126,7 +131,7 @@ test("SessionPageState.fromBranch restores tab targets, ref snapshots, invalidat
 
 test("SessionPageState.fromBranch preserves a custom page-transition invalidation summary", () => {
 	const custom = buildPageTransitionRefSnapshotInvalidation("A failed eval may still have changed the page.");
-	const state = SessionPageState.fromBranch([
+	const state = restoreLegacyBranch([
 		toolEntry({
 			command: "eval",
 			refSnapshotInvalidation: custom,
@@ -138,7 +143,7 @@ test("SessionPageState.fromBranch preserves a custom page-transition invalidatio
 
 test("SessionPageState.fromBranch clears restored page state on upstream close aliases", () => {
 	for (const command of ["close", "quit", "exit"] as const) {
-		const state = SessionPageState.fromBranch([
+		const state = restoreLegacyBranch([
 			toolEntry({
 				command: "snapshot",
 				refSnapshot: { refIds: ["e1"], target: { title: "Example", url: "https://example.com/" } },
@@ -156,7 +161,7 @@ test("SessionPageState.fromBranch clears restored page state on upstream close a
 		}, command);
 	}
 
-	const nestedClose = SessionPageState.fromBranch([
+	const nestedClose = restoreLegacyBranch([
 		toolEntry({
 			command: "snapshot",
 			refSnapshot: { refIds: ["e1"], target: { title: "Example", url: "https://example.com/" } },
@@ -179,7 +184,7 @@ test("SessionPageState.fromBranch clears restored page state on upstream close a
 		tabTarget: undefined,
 	});
 
-	const closeThenRecord = SessionPageState.fromBranch([
+	const closeThenRecord = restoreLegacyBranch([
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e1"] }, sessionName: "s1", sessionTabTarget: { url: "https://before.example/" } }),
 		toolEntry({
 			batchSteps: [
@@ -193,7 +198,7 @@ test("SessionPageState.fromBranch clears restored page state on upstream close a
 	assert.equal(closeThenRecord.get("s1").tabTarget, undefined);
 	assert.equal(closeThenRecord.get("s1").refSnapshot, undefined);
 
-	const closeThenOpen = SessionPageState.fromBranch([
+	const closeThenOpen = restoreLegacyBranch([
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e1"] }, sessionName: "s1", sessionTabTarget: { url: "https://before.example/" } }),
 		toolEntry({
 			batchSteps: [
@@ -208,7 +213,7 @@ test("SessionPageState.fromBranch clears restored page state on upstream close a
 	assert.deepEqual(closeThenOpen.get("s1").tabTarget, { title: undefined, url: "https://after.example/" });
 	assert.equal(closeThenOpen.get("s1").refSnapshot, undefined);
 
-	const closeAll = SessionPageState.fromBranch([
+	const closeAll = restoreLegacyBranch([
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e1"] }, sessionName: "s1", sessionTabTarget: { url: "https://one.example/" } }),
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e2"] }, sessionName: "s2", sessionTabTarget: { url: "https://two.example/" } }),
 		toolEntry({ command: "snapshot", namespace: "other", refSnapshot: { refIds: ["e3"] }, sessionName: "s3", sessionTabTarget: { url: "https://three.example/" } }),
@@ -220,19 +225,19 @@ test("SessionPageState.fromBranch clears restored page state on upstream close a
 });
 
 test("SessionPageState restores unverified page transitions", () => {
-	const restored = SessionPageState.fromBranch([
+	const restored = restoreLegacyBranch([
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e1"] }, sessionName: "s1", sessionTabTarget: { url: "https://example.com/" } }),
 		toolEntry({ command: "connect", refSnapshot: { refIds: ["stale"] }, sessionName: "s1", sessionTabTarget: { url: "https://stale.example/" }, sessionTabTargetUnknown: true }),
 	]);
 	assert.deepEqual(restored.get("s1"), {
 		pinningReason: undefined,
 		refSnapshot: undefined,
-		refSnapshotInvalidation: undefined,
+		refSnapshotInvalidation: buildPageTransitionRefSnapshotInvalidation("The browser target or operation outcome is unknown. Verify the current URL and take a fresh snapshot before using refs."),
 		tabTargetUnknown: true,
 		tabTarget: undefined,
 	});
 
-	const recordStart = SessionPageState.fromBranch([
+	const recordStart = restoreLegacyBranch([
 		toolEntry({ command: "snapshot", refSnapshot: { refIds: ["e1"] }, sessionName: "s1", sessionTabTarget: { url: "https://example.com/" } }),
 		toolEntry({ command: "record", refSnapshotInvalidation: buildPageTransitionRefSnapshotInvalidation(), sessionName: "s1", sessionTabTargetUnknown: true, subcommand: "start" }),
 	]);

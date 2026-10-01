@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
+import { convertBrowserEntries } from "../extensions/agent-browser/lib/browser-session-conversion.js";
 import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 import { createExtensionHarness, createToolBranchEntry, executeRegisteredTool, readInvocationLog, runExtensionEvent, withPatchedEnv, writeFakeAgentBrowserBinary } from "./helpers/agent-browser-harness.js";
 
@@ -63,13 +64,15 @@ for (const shared of [false, true]) for (const command of ["confirm", "deny"]) {
 			const action = (read.details?.nextActions as Array<{ id: string; params: { args: string[] } }>).find(action => action.id === (command === "confirm" ? "approve-confirmation" : "deny-confirmation"));
 			assert.deepEqual(action?.params.args, ["--namespace", shared ? "team" : "", "--session", shared ? "shared" : "default", command, "read-id"]);
 			branch.push(createToolBranchEntry({ details: read.details!, isError: read.isError }));
-			const pendingState = SessionPageState.fromBranch(branch);
+			const pendingState = SessionPageState.fromBranch(convertBrowserEntries(branch));
+			assert.ok(pendingState.findReadConfirmation(["confirm", "read-id"]), JSON.stringify(branch));
 			assert.equal(pendingState.findReadConfirmation(["--session", "piab-script-isolated", command, "read-id"], ""), undefined, "an isolated script's explicit identity cannot select a shared read confirmation");
 			assert.equal(pendingState.findReadConfirmation(["--namespace", "other", command, "read-id"], "other"), undefined);
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
 			harness = createExtensionHarness({ cwd: root, branch });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 			await writeFile(log, "");
+			const beforeConfirm = structuredClone(harness.ctx.sessionManager.getBranch());
 			const confirmed = await executeRegisteredTool(harness.tool, harness.ctx, { args: [command, "read-id"] });
 			assert.equal(confirmed.isError, false, confirmed.content[0]?.text);
 			assert.equal(confirmed.details?.sessionName, shared ? "shared" : "default");
@@ -77,8 +80,8 @@ for (const shared of [false, true]) for (const command of ["confirm", "deny"]) {
 			assert.deepEqual((await readInvocationLog(log)).map(call => extractUpstreamCommandTokens(call.args)), [[command, "read-id"]]);
 			assert.equal(JSON.parse(await readFile(state, "utf8")).browserTouches, 0);
 			branch.push(createToolBranchEntry({ details: confirmed.details!, isError: confirmed.isError }));
-			assert.equal(SessionPageState.fromBranch(branch).findReadConfirmation(["confirm", "read-id"]), undefined);
-			assert.equal(SessionPageState.fromBranch(branch.slice(0, -1)).findReadConfirmation(["confirm", "read-id"])?.id, "read-id");
+			assert.equal(SessionPageState.fromBranch(convertBrowserEntries(branch)).findReadConfirmation(["confirm", "read-id"]), undefined);
+			assert.equal(SessionPageState.fromBranch(beforeConfirm).findReadConfirmation(["confirm", "read-id"])?.id, "read-id");
 			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 		});
 	});
@@ -199,7 +202,7 @@ test("DOM and page-content-shaped confirmations keep their existing page checks"
 		const actions = blocked.details?.nextActions as Array<{ params: { args: string[] } }>;
 		assert.deepEqual(actions.map(action => action.params.args), [["--session", "shared", "confirm", "dom-id"], ["--session", "shared", "deny", "dom-id"]]);
 		branch.push(createToolBranchEntry({ details: blocked.details!, isError: blocked.isError }));
-		const replayed = SessionPageState.fromBranch(branch);
+		const replayed = SessionPageState.fromBranch(convertBrowserEntries(branch));
 		assert.equal(replayed.findReadConfirmation(["--session", "shared", "confirm", "read-id"]), undefined);
 		assert.equal(replayed.findReadConfirmation(["--session", "shared", "confirm", "dom-id"]), undefined);
 		await writeFile(log, "");

@@ -11,6 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 
 import {
 	createExtensionHarness,
@@ -400,7 +401,8 @@ if (args.includes("snapshot")) {
 					role: "button",
 				},
 			]);
-			assert.deepEqual((result.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e3", "e4", "e5", "e6"]);
+			assert.equal(result.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(result.details?.sessionName)).refSnapshot?.refIds, ["e3", "e4", "e5", "e6"]);
 
 			const nextActions = result.details?.nextActions as Array<{ id?: string; params?: { args?: string[] }; safety?: string }> | undefined;
 			assert.deepEqual(nextActions?.map((action) => action.id), ["refresh-interactive-refs", "try-current-visible-ref"]);

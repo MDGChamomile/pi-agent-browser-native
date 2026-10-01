@@ -14,6 +14,7 @@ import { mkdtemp, readFile, rm, watch, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 
 import { directoryExists } from "../extensions/agent-browser/lib/fs-utils.js";
 import { createImplicitSessionName } from "../extensions/agent-browser/lib/runtime.js";
@@ -323,10 +324,10 @@ if (args.includes("open")) {
 
 			const firstOpen = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://first.example/"], sessionMode: "fresh" });
 			const firstSessionName = firstOpen.details?.sessionName as string;
-			const branchA = [createToolBranchEntry({ details: firstOpen.details ?? {}, isError: false })];
+			const branchA = [...harness.ctx.sessionManager.getBranch()];
 			const secondOpen = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://second.example/"], sessionMode: "fresh" });
 			const secondSessionName = secondOpen.details?.sessionName as string;
-			const branchB = [createToolBranchEntry({ details: secondOpen.details ?? {}, isError: false })];
+			const branchB = [...harness.ctx.sessionManager.getBranch()];
 			assert.notEqual(firstSessionName, secondSessionName);
 
 			harness.setBranch(branchA);
@@ -903,7 +904,8 @@ test("agentBrowserExtension restores headed autosave policy for an off-current E
 		`const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, autosave: process.env.AGENT_BROWSER_AUTOSAVE_INTERVAL_MS ?? null }) + "\\n");
-if (args.includes("title")) process.stdout.write(JSON.stringify({ success: true, data: { result: "Headed Electron" } }));
+if (args.includes("session") && args.includes("info")) process.stdout.write(JSON.stringify({ success: true, data: { active: false, runtime: null } }));
+else if (args.includes("title")) process.stdout.write(JSON.stringify({ success: true, data: { result: "Headed Electron" } }));
 else if (args.includes("url")) process.stdout.write(JSON.stringify({ success: true, data: { result: "app://headed-electron" } }));
 else if (args.includes("tab") && args.includes("list")) process.stdout.write(JSON.stringify({ success: true, data: [{ active: true, title: "Headed Electron", url: "app://headed-electron" }] }));
 else if (args.includes("snapshot")) process.stdout.write(JSON.stringify({ success: true, data: { origin: "app://headed-electron", refs: {}, snapshot: "" } }));
@@ -911,7 +913,7 @@ else process.stdout.write(JSON.stringify({ success: true, data: { closed: args.i
 	);
 
 	try {
-		await withPatchedEnv({ AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: undefined, PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: undefined, PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const userDataDir = await createSecureTempDirectory("electron-profile-");
 			child = spawnElectronFixtureProcess(userDataDir);
 			const baseSessionName = createImplicitSessionName(TEST_SESSION_ID, tempDir, "test-seed");
@@ -972,11 +974,7 @@ else process.stdout.write(JSON.stringify({ success: true, data: { closed: args.i
 			assert.equal(probe.details?.managedSessionHeadedAutosaveDisabled, true, JSON.stringify(probe.details));
 
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: electronDetails, isError: false }),
-					createToolBranchEntry({ details: replacementDetails, isError: false }),
-					createToolBranchEntry({ details: probe.details, isError: false }),
-				],
+				branch: harness.ctx.sessionManager.getBranch().slice(),
 				cwd: tempDir,
 			});
 			await runExtensionEvent(resumedHarness.handlers, "session_start", { reason: "resume" }, resumedHarness.ctx);
@@ -1090,10 +1088,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { closed: args.includ
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 			const cleanup = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "cleanup", launchId: electronRecord.launchId } });
 			assert.equal(cleanup.isError, false, JSON.stringify(cleanup));
-			const cleanupBranch = [
-				createToolBranchEntry({ details: launchDetails, isError: false }),
-				createToolBranchEntry({ details: cleanup.details ?? {}, isError: cleanup.isError }),
-			];
+			const cleanupBranch = harness.ctx.sessionManager.getBranch().slice();
 
 			harness.setBranch(cleanupBranch);
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "cleanup", oldLeafId: "live" }, harness.ctx);
@@ -1812,7 +1807,8 @@ if (args.includes("snapshot")) {
 			const networkRequest = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["network", "request", "42"] });
 			assert.equal(networkRequest.isError, false, JSON.stringify(networkRequest));
 			assert.deepEqual(networkRequest.details?.sessionTabTarget, { title: undefined, url: "https://app.example/" });
-			assert.deepEqual((networkRequest.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e1"]);
+			assert.equal(networkRequest.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(networkRequest.details?.sessionName)).refSnapshot?.refIds, ["e1"]);
 
 			const pageErrors = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["errors"] });
 			assert.equal(pageErrors.isError, false, JSON.stringify(pageErrors));
@@ -1826,7 +1822,8 @@ if (args.includes("snapshot")) {
 			const networkSourceLookup = await executeRegisteredTool(harness.tool, harness.ctx, { networkSourceLookup: { requestId: "42" } });
 			assert.equal(networkSourceLookup.isError, false, JSON.stringify(networkSourceLookup));
 			assert.deepEqual(networkSourceLookup.details?.sessionTabTarget, { title: undefined, url: "https://app.example/" });
-			assert.deepEqual((networkSourceLookup.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e1"]);
+			assert.equal(networkSourceLookup.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(networkSourceLookup.details?.sessionName)).refSnapshot?.refIds, ["e1"]);
 
 			const clickAfterNetworkSourceLookup = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["click", "@e1"] });
 			assert.equal(clickAfterNetworkSourceLookup.isError, false, JSON.stringify(clickAfterNetworkSourceLookup));
@@ -1851,7 +1848,9 @@ test("agentBrowserExtension ignores restored diagnostic session targets that con
 		`const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
-if (args.includes("tab") && args.includes("list")) {
+if (args.includes("snapshot")) {
+  process.stdout.write(JSON.stringify({ success: true, data: { origin: "https://app.example/", snapshot: '- button "Refresh" [ref=e1]', refs: { e1: { role: "button", name: "Refresh" } } } }));
+} else if (args.includes("tab") && args.includes("list")) {
   process.stdout.write(JSON.stringify({ success: true, data: { tabs: [{ tabId: "t1", url: "https://app.example/", active: true }] } }));
 } else if (args.includes("click")) {
   process.stdout.write(JSON.stringify({ success: true, data: { clicked: "@e1" } }));
@@ -1863,6 +1862,9 @@ if (args.includes("tab") && args.includes("list")) {
 	try {
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
 			const appTarget = { title: undefined, url: "https://app.example/" };
+			const seed = createExtensionHarness({ cwd: tempDir });
+			const capture = await executeRegisteredTool(seed.tool, seed.ctx, { args: ["--session", "named", "snapshot", "-i"] });
+			assert.equal(capture.isError, false, JSON.stringify(capture));
 			const harness = createExtensionHarness({
 				branch: [
 					createToolBranchEntry({
@@ -1878,7 +1880,7 @@ if (args.includes("tab") && args.includes("list")) {
 						details: {
 							args: ["--session", "named", "snapshot", "-i"],
 							command: "snapshot",
-							refSnapshot: { refIds: ["e1"], target: appTarget },
+							refSnapshot: capture.details?.refSnapshot,
 							sessionName: "named",
 							sessionTabTarget: appTarget,
 						},
@@ -1888,7 +1890,7 @@ if (args.includes("tab") && args.includes("list")) {
 						details: {
 							args: ["--session", "named", "network", "request", "42"],
 							command: "network",
-							refSnapshot: { refIds: ["e1"], target: appTarget },
+							refSnapshot: capture.details?.refSnapshot,
 							sessionName: "named",
 							sessionTabTarget: { title: undefined, url: "https://app.example/api/data" },
 							subcommand: "request",
@@ -1907,7 +1909,7 @@ if (args.includes("tab") && args.includes("list")) {
 									success: true,
 								},
 							],
-							refSnapshot: { refIds: ["e1"], target: appTarget },
+							refSnapshot: capture.details?.refSnapshot,
 							sessionName: "named",
 							sessionTabTarget: { title: undefined, url: "https://app.example/api/data" },
 						},
@@ -1921,9 +1923,11 @@ if (args.includes("tab") && args.includes("list")) {
 			const click = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "named", "click", "@e1"] });
 			assert.equal(click.isError, false, JSON.stringify(click));
 			assert.notEqual(click.details?.failureCategory, "stale-ref");
-			assert.deepEqual(click.details?.sessionTabTarget, appTarget);
-			assert.deepEqual((click.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e1"]);
-			assert.equal("order" in ((click.details?.refSnapshot as Record<string, unknown> | undefined) ?? {}), false);
+			assert.equal((click.details?.sessionTabTarget as { url: string }).url, appTarget.url);
+			assert.equal(click.details?.refSnapshot, undefined);
+			const restoredSnapshot = SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get("named").refSnapshot;
+			assert.deepEqual(restoredSnapshot?.refIds, ["e1"]);
+			assert.equal("order" in (restoredSnapshot ?? {}), false);
 
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.filter((entry) => entry.args.includes("click")).length, 1);
@@ -1983,7 +1987,8 @@ if (args.includes("click")) {
 			assert.equal(click.isError, true);
 			assert.equal(click.details?.failureCategory, "stale-ref");
 			assert.deepEqual(click.details?.refIds, ["e1"]);
-			assert.deepEqual((click.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, []);
+			assert.equal(click.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get("named").refSnapshot?.refIds, []);
 			assert.equal(click.details?.refSnapshotInvalidation, undefined);
 			assert.match((click.content[0] as { text: string }).text, /was not present in the latest snapshot/);
 
@@ -2046,7 +2051,8 @@ if (args.includes("snapshot")) {
 			assert.equal(staleClick.isError, true, JSON.stringify(staleClick));
 			assert.equal(staleClick.details?.failureCategory, "stale-ref");
 			assert.match((staleClick.content[0] as { text: string }).text, /was not present in the latest snapshot/);
-			assert.deepEqual((staleClick.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, []);
+			assert.equal(staleClick.details?.refSnapshot, undefined);
+			assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(staleClick.details?.sessionName)).refSnapshot?.refIds, []);
 
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.filter((entry) => entry.args.includes("click")).length, 0);

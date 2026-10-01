@@ -152,10 +152,14 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		// A host-filtered catalog is an explicit selection, not our default surface.
 		const available = new Set(pi.getAllTools().map(({ name }) => name));
 		if (!["agent_browser", "agent_browser_code", "agent_browser_tools", ...advancedNames].every(name => available.has(name))) return;
-		// Keep Pi's replay helper behind the awaited restoration boundary, not factory registration.
-		const { getCurrentSystemMessage } = await import("@earendil-works/pi-ai");
-		const current = getCurrentSystemMessage(ctx.sessionManager.buildSessionProjection().messages);
-		const restored = new Set(current?.toolsAdded?.map(({ name }) => name));
+		// Native dynamic imports bypass Pi's host-package aliases in consumer installs.
+		// Only tool names are needed; replay their native deltas without a host import.
+		const restored = new Set<string>();
+		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
+			if (message.role !== "system") continue;
+			for (const removed of message.toolsRemoved ?? []) restored.delete(removed.name);
+			for (const added of message.toolsAdded ?? []) restored.add(added.name);
+		}
 		const active = pi.getActiveTools().filter((name) => !advancedNames.has(name) || restored.has(name));
 		pi.setActiveTools([...new Set([...active, ...[...restored].filter((name) => advancedNames.has(name) && available.has(name))])]);
 	});

@@ -174,7 +174,8 @@ else process.stdout.write(JSON.stringify({ success:true, data:{ url:'https://exa
 				assert.equal(result.details?.failureCategory, "aborted");
 				if (args[0] === "get" || args.at(-1) === "text") {
 					assert.equal(result.details?.sessionTabTargetUnknown, undefined);
-					assert.deepEqual(result.details?.refSnapshot, snapshot.details?.refSnapshot);
+					assert.equal(result.details?.refSnapshot, undefined);
+					assert.deepEqual(SessionPageState.fromBranch(h.ctx.sessionManager.getBranch()).get(String(result.details?.sessionName)).refSnapshot, snapshot.details?.refSnapshot);
 				} else {
 					assert.equal(result.details?.sessionTabTargetUnknown, true, args.join(" "));
 					assert.equal(result.details?.refSnapshot, undefined);

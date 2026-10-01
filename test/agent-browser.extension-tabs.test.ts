@@ -18,7 +18,6 @@ import {
 import {
 	TEST_SESSION_ID,
 	createExtensionHarness,
-	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
@@ -120,7 +119,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			await runExtensionEvent(firstHarness.handlers, "session_shutdown");
 
 			const resumedHarness = createExtensionHarness({
-				branch: [createToolBranchEntry({ details: firstResult.details as Record<string, unknown> })],
+				branch: [...firstHarness.ctx.sessionManager.getBranch()],
 				cwd: tempDir,
 				sessionDir,
 				sessionFile,
@@ -382,7 +381,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 				const opened = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "popup", "open", "https://popup.example/same"] });
 				assert.equal(opened.isError, false, JSON.stringify(opened));
 				assert.ok(opened.details);
-				const resumed = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details, isError: false })] });
+				const resumed = createExtensionHarness({ cwd: tempDir, branch: harness.ctx.sessionManager.getBranch().slice() });
 				await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
 				const steps = [...(mode === "open-click" ? [["open", "https://popup.example/same"]] : []), ["click", "#popup"], ...(mode === "closed" ? [["close"]] : [])];
 				const popup = await executeRegisteredTool(resumed.tool, resumed.ctx, {
