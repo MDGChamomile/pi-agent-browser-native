@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Update the official Pi validation graph to 0.99.2; wildcard runtime peers and the Pi 0.87.0 minimum remain unchanged.
 - Persist small canonical browser begin/finish events, complete ref definitions once per capture, and artifact-row changes instead of repeating full state after ordinary commands. Tool results retain invocation receipts and dedicated capture/export data.
 - Replay selected journal envelopes and winning definitions through public Pi APIs with bounded token parsing on official and fork hosts. Stock official Pi's own eager loader remains a separate limitation.
 - Add `pi-agent-browser-convert` for validated offline separate-copy conversion of stopped legacy sessions, preserving original bytes, ancestry, explicit observations and source-owner cleanup facts.
