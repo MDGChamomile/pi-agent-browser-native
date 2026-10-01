@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 
 import {
 	createExtensionHarness,
@@ -40,7 +41,8 @@ else process.stdout.write(JSON.stringify({ success: true, data: { url: ${JSON.st
 				const read = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "value", "@e1"] });
 				assert.equal(read.isError, false, read.content[0]?.text);
 				assert.equal(read.details?.sessionName, opened.details?.sessionName);
-				assert.deepEqual(read.details?.refSnapshot, snapshot.details?.refSnapshot);
+				assert.equal(read.details?.refSnapshot, undefined);
+				assert.deepEqual(SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch()).get(String(read.details?.sessionName)).refSnapshot, snapshot.details?.refSnapshot);
 				assert.deepEqual((read.details?.sessionTabTarget as { url: string }).url, url);
 				assert.deepEqual((await readInvocationLog(logPath)).filter((row) => row.args.includes("upgrade")).map((row) => row.args), [["--json", "upgrade"]]);
 			} finally { await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx); }

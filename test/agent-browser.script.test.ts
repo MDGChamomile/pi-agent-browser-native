@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,7 +17,8 @@ import {
 	type AgentBrowserScriptBrowserEnvelope,
 } from "../extensions/agent-browser/lib/input-modes/script.js";
 import { createBrowserCodeOutput } from "../extensions/agent-browser/lib/orchestration/script-mode.js";
-import { BROWSER_TRANSITION_ENTRY } from "../extensions/agent-browser/lib/browser-transcript.js";
+import { convertBrowserEntries } from "../extensions/agent-browser/lib/browser-session-conversion.js";
+import { BROWSER_TRANSITION_ENTRY, getBrowserRecord } from "../extensions/agent-browser/lib/browser-transcript.js";
 import { getAgentBrowserSessionIdentityKey } from "../extensions/agent-browser/lib/argv-grammar.js";
 import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 import { createExtensionHarness, executeRegisteredTool, readInvocationLog, runExtensionEvent, withPatchedEnv, writeFakeAgentBrowserBinary } from "./helpers/agent-browser-harness.js";
@@ -174,6 +175,7 @@ if(command==='open'){url=args[args.indexOf('open')+1]; fs.writeFileSync(${JSON.s
 else if(command==='close') data={closed:true};
 else if(command==='snapshot') data={url,refs:{e1:{role:'button',name:'Submit'}},snapshot:'- button "Submit" [ref=e1]'};
 else if(command==='eval') data={result:'x'.repeat(30000)+'END'};
+else if(command==='batch') data=args.slice(args.indexOf('batch')+1).filter(arg=>arg!=='--bail').map(row=>({command:row.split(' '),success:true,result:{}}));
 else data=args.includes('url')?{url}:{title:'Fixture'};
 process.stdout.write(JSON.stringify({success:true,data}));`);
 	try {
@@ -199,8 +201,8 @@ test("code shares the selected persistent browser with direct calls and persists
 		assert.equal(second.details?.sessionName, first.details?.sessionName);
 		assert.equal((await readInvocationLog(logPath)).some(call => call.args.includes("close")), false, "code completion must preserve the browser");
 		const transitions = harness.appendedEntries.filter(entry => entry.customType === BROWSER_TRANSITION_ENTRY);
-		assert.equal(transitions.length, 8, "each dispatched inner command has an intent and completed transition");
-		assert.ok(transitions.every(entry => !("data" in (entry.data as { details: object }).details)), "state journal must not copy page output");
+		assert.equal(transitions.length, 10, "direct and inner commands each persist a begin/finish pair");
+		assert.ok(transitions.every(entry => !("data" in (entry.data as { event: { state: object } }).event.state)), "state journal must not copy page output");
 		const state = SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch());
 		const key = getAgentBrowserSessionIdentityKey(String(first.details?.sessionName));
 		assert.equal(state.get(key).tabTarget?.url, "https://fixture.test/two");
@@ -267,6 +269,43 @@ test("code export failures preserve partial data and render one truthful observa
 	});
 });
 
+test("session_tree joins oversized code observation finalization without publishing A artifacts onto independent B", { concurrency: false, timeout: 15_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "piab-code-finalization-race-"));
+	try {
+		const marker = join(root, "effect-started"), file = join(root, "session.jsonl");
+		await writeFakeAgentBrowserBinary(root, `const fs=require('node:fs'), args=process.argv.slice(2);
+if(args.includes('eval')) {fs.writeFileSync(${JSON.stringify(marker)},'started'); setInterval(()=>{},1000);}
+else process.stdout.write(JSON.stringify({success:true,data:{url:'https://fixture.test/'}}));`);
+		await withPatchedEnv({ PATH: `${root}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`, AGENT_BROWSER_SESSION: undefined, AGENT_BROWSER_NAMESPACE: undefined }, async () => {
+			const branch = (id: string) => [{ type: "message", id, parentId: null, message: { role: "user", content: [{ type: "text", text: `Branch ${id}` }] } }];
+			const harness = createExtensionHarness({ cwd: root, sessionFile: file, branch: branch("a") });
+			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
+			const pending = executeRegisteredTool(harness.getTool("agent_browser_code")!, harness.ctx, {
+				session: "finalization-race", code: 'emit("x".repeat(24000)); await browser({args:["eval","--stdin"],stdin:"1"});',
+			});
+			const deadline = Date.now() + 10_000;
+			while (true) {
+				try { await readFile(marker); break; }
+				catch { assert.ok(Date.now() < deadline, "code must reach the real fake-upstream effect before tree navigation"); await delay(10); }
+			}
+			harness.setBranch(branch("b"));
+			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "b", oldLeafId: "a" }, harness.ctx);
+			const result = await pending;
+			assert.equal(result.isError, true);
+			assert.equal((result.details?.codeRun as { aborted?: boolean }).aborted, true);
+			assert.equal(result.details?.data, "x".repeat(24000), "the caller retains complete selected output after interruption");
+			const observation = JSON.parse(result.content.find(part => part.type === "text")?.text ?? "{}");
+			assert.equal(JSON.parse(await readFile(observation.observationPath, "utf8")).data, "x".repeat(24000));
+			assert.deepEqual(harness.ctx.sessionManager.getBranch().map(entry => (entry as { id: string }).id), ["b"], "outer finalization cannot append A's artifact state beneath B");
+			const all = (await readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+			const begins = all.map(getBrowserRecord).filter(record => record?.event.phase === "begin");
+			assert.equal(begins.length, 1);
+			assert.equal(SessionPageState.fromBranch(all).get("finalization-race").tabTargetUnknown, true, "the unfinished effect remains uncertain");
+			await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
+		});
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("raw batch credentials are absent from code intent and completion journals", { concurrency: false }, async () => {
 	await withCodeHarness(async (harness, logPath) => {
 		const rows = ['cookies set session synthetic-cookie-value', 'storage local set token synthetic-storage-value', 'clipboard write synthetic-clipboard-value'];
@@ -282,19 +321,25 @@ test("raw batch credentials are absent from code intent and completion journals"
 
 test("pending inner transitions restore unknown target after interruption", () => {
 	const key = getAgentBrowserSessionIdentityKey("selected");
-	const state = SessionPageState.fromBranch([
+	const state = SessionPageState.fromBranch(convertBrowserEntries([
 		{ type: "custom", customType: BROWSER_TRANSITION_ENTRY, data: { isError: false, details: { args: ["snapshot", "-i"], sessionName: "selected", sessionTabTarget: { url: "https://fixture.test/old" }, refSnapshot: { refIds: ["e1"] } } } },
 		{ type: "custom", customType: BROWSER_TRANSITION_ENTRY, data: { isError: true, details: { args: ["click", "@e1"], sessionName: "selected", sessionTabTargetUnknown: true } } },
-	]);
+	]));
 	assert.equal(state.get(key).tabTargetUnknown, true); assert.equal(state.get(key).refSnapshot, undefined);
 });
 
 test("pre-0.7 script cleanup leases remain recoverable after upgrade", { concurrency: false }, async () => {
 	await withCodeHarness(async (harness, logPath) => {
 		const sessionName = "piab-script-12345678-1234-4123-8123-123456789abc";
-		const resumed = createExtensionHarness({ cwd: harness.ctx.cwd, sessionFile: join(harness.ctx.cwd, "session.jsonl"), branch: [{ type: "custom", customType: "agent-browser-script-session", data: { cleanup: "failed", closeCommandArgs: ["--namespace", "", "--session", sessionName, "close"], launchAttempted: true, sessionName } }] });
+		const legacy = [{ type: "custom", customType: "agent-browser-script-session", data: { cleanup: "failed", closeCommandArgs: ["--namespace", "", "--session", sessionName, "close"], launchAttempted: true, sessionName } }];
+		const canonical = convertBrowserEntries(legacy, harness.ctx.sessionManager.getSessionId());
+		const fork = createExtensionHarness({ cwd: harness.ctx.cwd, sessionId: "ordinary-fork", branch: canonical });
+		await runExtensionEvent(fork.handlers, "session_start", { reason: "fork" }, fork.ctx);
+		await runExtensionEvent(fork.handlers, "session_shutdown", { reason: "quit" }, fork.ctx);
+		assert.equal((await readInvocationLog(logPath)).some(call => call.args.includes(sessionName) && call.args.includes("close")), false, "a new Pi UUID never inherits the parent's cleanup lease");
+		const resumed = createExtensionHarness({ cwd: harness.ctx.cwd, sessionFile: join(harness.ctx.cwd, "session.jsonl"), branch: canonical });
 		await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
 		assert.ok((await readInvocationLog(logPath)).some(call => call.args.includes(sessionName) && call.args.includes("close")));
-		assert.equal((resumed.appendedEntries.at(-1)?.data as { cleanup?: string }).cleanup, "closed");
+		assert.equal((resumed.appendedEntries.at(-1)?.data as { event: { state: { scriptLease: { cleanup?: string } } } }).event.state.scriptLease.cleanup, "closed");
 	});
 });

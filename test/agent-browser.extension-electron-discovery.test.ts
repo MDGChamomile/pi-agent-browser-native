@@ -31,7 +31,6 @@ import {
 } from "../extensions/agent-browser/lib/temp.js";
 import {
 	createExtensionHarness,
-	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	readChildStdoutJsonLine,
@@ -640,7 +639,7 @@ test("agentBrowserExtension restores Electron launch records and cleans them on 
 			const launch = (launchResult.details?.electron as { launch: ElectronLaunchRecord }).launch;
 			launchedPid = launch.pid;
 
-			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: launchResult.details as Record<string, unknown> })] });
+			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: firstHarness.ctx.sessionManager.getBranch().slice() });
 			await runExtensionEvent(restoredHarness.handlers, "session_start", { reason: "resume" }, restoredHarness.ctx);
 			const statusResult = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, { electron: { action: "status", launchId: launch.launchId as string } });
 			assert.equal(statusResult.isError, false);

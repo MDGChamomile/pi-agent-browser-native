@@ -746,7 +746,7 @@ export async function cleanupTrackedElectronHostLaunches(options: ElectronHostLa
 		const sessionKey = getSessionPageStateKey(record.sessionName, record.namespace) ?? record.sessionName;
 		const managedSessionOwner = sessionKey ? options.ownedManagedSessions.get(sessionKey) : undefined;
 		const managedSessionCloseError = record.sessionName
-			? await closeManagedSession({ cwd: options.cwd, headedManagedAutosaveInterval: managedSessionOwner?.headedManagedAutosaveInterval, namespace: record.namespace, preserveAttachedBrowserSession: options.attachedSessionKeys.has(sessionKey ?? record.sessionName), restoreState: options.managedSessionRestoreState, sessionName: record.sessionName, timeoutMs: options.timeoutMs })
+			? await closeManagedSession({ cwd: options.cwd, headedManagedAutosaveInterval: managedSessionOwner?.headedManagedAutosaveInterval, namespace: record.namespace, preserveAttachedBrowserSession: options.attachedSessionKeys.has(sessionKey ?? record.sessionName), restoreState: options.managedSessionRestoreState, sessionName: record.sessionName, socketDir: managedSessionOwner?.socketDir, timeoutMs: options.timeoutMs })
 			: undefined;
 		const managedSessionStep = record.sessionName
 			? managedSessionCloseError

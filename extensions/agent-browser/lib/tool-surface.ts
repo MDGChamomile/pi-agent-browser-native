@@ -15,7 +15,6 @@ import {
 	type AgentBrowserAdvancedTool,
 } from "./input-modes/params.js";
 import type { AgentBrowserExecuteParams } from "./orchestration/input-plan.js";
-import { ADVANCED_TOOL_PROMPT_GUIDELINES, buildToolPromptGuidelines } from "./playbook.js";
 
 export type AgentBrowserExecutor = ToolDefinition<TUnsafe<AgentBrowserExecuteParams>>["execute"];
 export type AgentBrowserCodeExecutor = ToolDefinition<TUnsafe<AgentBrowserCodeParams>>["execute"];
@@ -23,7 +22,6 @@ export type AgentBrowserCodeExecutor = ToolDefinition<TUnsafe<AgentBrowserCodePa
 export interface AgentBrowserToolSurfaceOptions {
 	execute: AgentBrowserExecutor;
 	executeCode: AgentBrowserCodeExecutor;
-	promptGuidelines?: string[];
 	executionMode?: ToolDefinition["executionMode"];
 	renderCall?: ToolDefinition<typeof AGENT_BROWSER_PARAMS>["renderCall"];
 	renderResult?: ToolDefinition<TUnsafe<unknown>>["renderResult"];
@@ -37,26 +35,20 @@ export const AGENT_BROWSER_TOOL_INVENTORY = {
 	network: { name: "agent_browser_network_source", description: "Correlate failed requests with initiator and local-source candidates." },
 } as const satisfies Record<AgentBrowserAdvancedTool, { name: string; description: string }>;
 
-export const AGENT_BROWSER_DISCOVERY_GROUP = {
+export const AGENT_BROWSER_INSTRUCTION_GROUP = {
 	name: "browser",
 	description: "Search the web, browse and interact with pages, verify browser UI, and inspect Electron apps.",
-	sections: ["agent_browser"],
 } as const;
-
-const entryDiscovery = { discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "entry" as const } };
-const advancedDiscovery = { discovery: { group: AGENT_BROWSER_DISCOVERY_GROUP, role: "advanced" as const } };
 
 const advancedNames = new Set<string>(Object.values(AGENT_BROWSER_TOOL_INVENTORY).map(({ name }) => name));
 
 /** Register once; advanced calls adapt only their input shape and reuse the ordinary executor. */
 export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: AgentBrowserToolSurfaceOptions): void {
 	pi.registerTool({
-		...entryDiscovery,
 		name: "agent_browser",
 		label: "Agent Browser",
 		description: "Browse and interact through native agent-browser commands. One command in args; fixed sequences use batch --bail and JSON-array stdin. Use agent_browser_code for loops/branches and agent_browser_tools for advanced capabilities.",
 		promptSnippet: "Browse pages, inspect current refs, interact, and run native command batches.",
-		promptGuidelines: options.promptGuidelines ?? buildToolPromptGuidelines({ includeWebSearch: false }),
 		parameters: AGENT_BROWSER_PARAMS,
 		renderCall: options.renderCall,
 		renderResult: options.renderResult,
@@ -64,7 +56,6 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		executionMode: options.executionMode,
 	});
 	pi.registerTool({
-		...entryDiscovery,
 		name: "agent_browser_code",
 		label: "Agent Browser Code",
 		description: "Run fresh JavaScript against a persistent browser. await browser({args,stdin?,timeoutMs?}) returns success/data/error/nextActions and imageObservations; emit(selected JSON) and emitImage(image handle) explicitly choose output. No host APIs or imports. Use native batch for fixed sequences.",
@@ -81,10 +72,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 	});
 
 	pi.registerTool({
-		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.action,
 		label: "Browser Action",
-		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.action],
 		parameters: AGENT_BROWSER_ACTION_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
@@ -93,10 +82,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
-		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.qa,
 		label: "Browser QA",
-		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.qa],
 		parameters: AGENT_BROWSER_QA_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
@@ -105,10 +92,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
-		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.electron,
 		label: "Browser Electron",
-		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.electron],
 		parameters: AGENT_BROWSER_ELECTRON_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
@@ -117,10 +102,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
-		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.source,
 		label: "Browser Source",
-		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.source],
 		parameters: AGENT_BROWSER_SOURCE_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
@@ -129,10 +112,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
-		...advancedDiscovery,
 		...AGENT_BROWSER_TOOL_INVENTORY.network,
 		label: "Browser Network Source",
-		promptGuidelines: [...ADVANCED_TOOL_PROMPT_GUIDELINES.network],
 		parameters: AGENT_BROWSER_NETWORK_SOURCE_PARAMS,
 		renderResult: options.renderResult,
 		executionMode: options.executionMode,
@@ -141,7 +122,6 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		},
 	});
 	pi.registerTool({
-		...entryDiscovery,
 		name: "agent_browser_tools",
 		label: "Browser Tools",
 		description: "List or enable advanced browser tools: action → agent_browser_action; qa → agent_browser_qa; electron → agent_browser_electron; source → agent_browser_source; network → agent_browser_network_source. Omit enable for inventory. Activation only adds tools; it preserves other active tools.",
@@ -172,10 +152,14 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		// A host-filtered catalog is an explicit selection, not our default surface.
 		const available = new Set(pi.getAllTools().map(({ name }) => name));
 		if (!["agent_browser", "agent_browser_code", "agent_browser_tools", ...advancedNames].every(name => available.has(name))) return;
-		// Keep Pi's replay helper behind the awaited restoration boundary, not factory registration.
-		const { getCurrentSystemMessage } = await import("@earendil-works/pi-ai");
-		const current = getCurrentSystemMessage(ctx.sessionManager.buildSessionProjection().messages);
-		const restored = new Set(current?.toolsAdded?.map(({ name }) => name));
+		// Native dynamic imports bypass Pi's host-package aliases in consumer installs.
+		// Only tool names are needed; replay their native deltas without a host import.
+		const restored = new Set<string>();
+		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
+			if (message.role !== "system") continue;
+			for (const removed of message.toolsRemoved ?? []) restored.delete(removed.name);
+			for (const added of message.toolsAdded ?? []) restored.add(added.name);
+		}
 		const active = pi.getActiveTools().filter((name) => !advancedNames.has(name) || restored.has(name));
 		pi.setActiveTools([...new Set([...active, ...[...restored].filter((name) => advancedNames.has(name) && available.has(name))])]);
 	});

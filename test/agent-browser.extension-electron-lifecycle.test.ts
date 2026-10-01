@@ -20,6 +20,8 @@ import { compileAgentBrowserElectron } from "../extensions/agent-browser/lib/inp
 import { cleanupElectronLaunchResources, type ElectronLaunchStatus } from "../extensions/agent-browser/lib/electron/cleanup.js";
 import { launchElectronApp, type ElectronLaunchRecord } from "../extensions/agent-browser/lib/electron/launch.js";
 
+import { getBrowserRecord } from "../extensions/agent-browser/lib/browser-transcript.js";
+import { isRecord } from "../extensions/agent-browser/lib/parsing.js";
 import { createManagedSessionRestoreKey, getManagedSessionRestoreScope } from "../extensions/agent-browser/lib/managed-session-restore.js";
 import { getSessionPageStateKey, SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 import {
@@ -260,10 +262,7 @@ test("Electron status separates cleanup history from live resources and preserve
 				const cleaned = await executeRegisteredTool(owner.tool, owner.ctx, { electron: { action: "cleanup", launchId: launch.launchId } });
 				assert.equal(cleaned.isError, false, JSON.stringify(cleaned));
 				await t.test("real cleanup and transcript replay freshly report an absent profile", async () => {
-					const replay = createExtensionHarness({ cwd: tempDir, branch: [
-						createToolBranchEntry({ details: launched.details as Record<string, unknown> }),
-						createToolBranchEntry({ details: cleaned.details as Record<string, unknown> }),
-					] });
+					const replay = createExtensionHarness({ cwd: tempDir, branch: owner.ctx.sessionManager.getBranch().slice() });
 					await runExtensionEvent(replay.handlers, "session_start", { reason: "resume" }, replay.ctx);
 					const result = await executeRegisteredTool(replay.tool, replay.ctx, { electron: { action: "status", launchId: launch.launchId } });
 					assert.equal(result.isError, false);
@@ -524,13 +523,24 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			assert.equal(probeInvocations.every((entry) => entry.args[entry.args.indexOf("--namespace") + 1] === ""), true);
 			assert.equal(probeInvocations.every((entry) => (entry as { restore?: string | null }).restore === null), true);
 
-			harness.setBranch([{ type: "message", message: { details: { ...launchResult.details, namespace: "team" }, isError: false, toolName: "agent_browser" } }]);
+			const namespacedBranch = harness.ctx.sessionManager.getBranch().map(entry => {
+				const record = getBrowserRecord(entry);
+				if (!record || !isRecord(entry)) return entry;
+				const state = record.event.state;
+				const { id: _id, parentId: _parentId, ...newEntry } = entry;
+				return { ...newEntry, data: { ...record, event: { ...record.event, state: {
+					...state, namespace: "team",
+					...(isRecord(state.managedSessionOutcome) ? { managedSessionOutcome: { ...state.managedSessionOutcome, currentSessionNamespace: "team" } } : {}),
+					...(isRecord(state.electron) && isRecord(state.electron.launch) ? { electron: { ...state.electron, launch: { ...state.electron.launch, namespace: "team" } } } : {}),
+				}, pages: record.event.pages?.map(page => ({ ...page, key: getSessionPageStateKey(launchDetails.electron.launch.sessionName, "team")! })) } } };
+			});
+			harness.setBranch(namespacedBranch);
 			await runExtensionEvent(harness.handlers, "session_tree", { newLeafId: "namespaced", oldLeafId: null }, harness.ctx);
 			const namespacedProbe = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "probe" } });
 			assert.equal(namespacedProbe.isError, false, JSON.stringify(namespacedProbe));
 			assert.equal(namespacedProbe.details?.namespace, "team");
 			assert.deepEqual((namespacedProbe.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e1"]);
-			const restoredPageState = SessionPageState.fromBranch([{ type: "message", message: { details: namespacedProbe.details, isError: false, toolName: "agent_browser" } }]);
+			const restoredPageState = SessionPageState.fromBranch(harness.ctx.sessionManager.getBranch());
 			const namespacedPageStateKey = getSessionPageStateKey(String(namespacedProbe.details?.sessionName), "team");
 			assert.ok(namespacedPageStateKey);
 			assert.deepEqual(restoredPageState.get(namespacedPageStateKey).refSnapshot?.refIds, ["e1"]);
@@ -571,7 +581,7 @@ test("agentBrowserExtension launches Electron with isolated profile, snapshot ha
 			assert.equal(cleanupResult.isError, false);
 			assert.match(cleanupResult.content[0]?.text ?? "", /fully cleaned/);
 			const cleanupManifest = cleanupResult.details?.artifactManifest as { entries?: Array<{ subcommand?: string }> } | undefined;
-			assert.equal(cleanupManifest?.entries?.some((entry) => entry.subcommand === "start"), false);
+			assert.equal((cleanupManifest?.entries ?? []).some((entry) => entry.subcommand === "start"), false);
 			const releasedRecordingPath = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["pdf", "electron-cleanup.webm"] });
 			assert.doesNotMatch(releasedRecordingPath.content[0]?.text ?? "", /reserved by an active recording/);
 			await assert.rejects(stat(launchDetails.electron.launch.userDataDir));
@@ -642,6 +652,17 @@ test("agentBrowserExtension retains headed autosave policy for Electron cleanup 
 			const launch = (launchResult.details?.electron as { launch?: { launchId?: string; pid?: number; userDataDir?: string } } | undefined)?.launch;
 			assert.equal(typeof launch?.launchId, "string");
 			launchedPid = launch?.pid;
+
+			const fork = createExtensionHarness({ cwd: tempDir, sessionId: "ordinary-electron-fork", branch: harness.ctx.sessionManager.getBranch() });
+			await runExtensionEvent(fork.handlers, "session_start", { reason: "fork" }, fork.ctx);
+			const beforeForkQuit = (await readInvocationLog(upstreamLogPath)).length;
+			const foreignCleanup = await executeRegisteredTool(fork.tool, fork.ctx, { electron: { action: "cleanup", all: true } });
+			assert.equal((foreignCleanup.details?.electron as { cleanup?: { records?: unknown[] } })?.cleanup?.records?.length ?? 0, 0);
+			await runExtensionEvent(fork.handlers, "session_shutdown", { reason: "quit" }, fork.ctx);
+			assert.equal((await readInvocationLog(upstreamLogPath)).slice(beforeForkQuit).some(entry => entry.args.includes("close")), false, "copied launch facts cannot give a new Pi UUID cleanup ownership");
+			assert.equal(typeof launchedPid, "number");
+			process.kill(launchedPid!, 0);
+			assert.ok((await stat(launch!.userDataDir!)).isDirectory(), "the parent's live profile survives fork quit");
 
 			await rm(upstreamLogPath, { force: true });
 			const statusResult = await executeRegisteredTool(harness.tool, harness.ctx, {
