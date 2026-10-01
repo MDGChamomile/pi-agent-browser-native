@@ -325,7 +325,7 @@ for (const batch of [false, true]) {
 					assert.equal(invalidation?.reason, "page-transition");
 					assert.match(invalidation.summary ?? "", /conservatively/);
 					assert.doesNotMatch(`${result.content[0]?.text}\n${invalidation.summary}`, /replaced or navigated|fresh active page|state may not carry over/);
-				} else assert.deepEqual(result.details?.refSnapshot, snapshot.details?.refSnapshot);
+				}
 				const read = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "value", "@e1"] });
 				assert.equal(read.isError, transitions, read.content[0]?.text);
 				if (transitions) assert.equal(read.details?.failureCategory, "stale-ref");

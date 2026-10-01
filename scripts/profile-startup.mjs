@@ -100,16 +100,17 @@ async function measureDirectImportSample(entrypoint, sampleIndex) {
 const start = performance.now();
 const extension = await import(${JSON.stringify(entrypoint)});
 const imported = performance.now();
+const registeredEvents = [];
 const pi = {
-  events: [],
+  events: { on(...args) { registeredEvents.push(args); } },
   tools: [],
-  on(...args) { this.events.push(args); },
+  on(...args) { registeredEvents.push(args); },
   registerTool(tool) { this.tools.push(tool.name); }
 };
 extension.default(pi);
 const registered = performance.now();
 console.log(JSON.stringify({
-  events: pi.events.length,
+  events: registeredEvents.length,
   importMs: imported - start,
   sampleIndex: ${sampleIndex},
   tools: pi.tools,

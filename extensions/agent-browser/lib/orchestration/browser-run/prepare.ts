@@ -484,6 +484,7 @@ export async function prepareBrowserRun(options: BrowserRunOptions): Promise<Pre
 			}) };
 		}
 		electronLaunch = launchResult.value;
+		electronLaunch.record.ownerSessionId = options.ctx.sessionManager.getSessionId();
 		runtimeToolArgs = ["connect", electronLaunch.connectArg];
 		runtimeToolStdin = undefined;
 	}
@@ -654,7 +655,18 @@ export async function prepareBrowserRun(options: BrowserRunOptions): Promise<Pre
 		const sessionTabPinningReason = priorSessionPageState.pinningReason;
 		let priorRefSnapshotState = priorSessionPageState.refSnapshot;
 		let priorRefSnapshotInvalidation = priorSessionPageState.refSnapshotInvalidation;
-		const coldManagedSession = !browserIndependent && (managedSessionDaemonInactive || priorSessionPageState.tabReopenPending === true)
+		let nativeGenerationChanged = false;
+		if (!browserIndependent && !isCloseCommand(executionPlan.commandInfo.command) && priorRefSnapshotState?.refIds.length && sessionStateKey && executionPlan.sessionName) {
+			const daemon = await inspectManagedSessionDaemon({ cwd, namespace: executionPlan.namespace, sessionName: executionPlan.sessionName, signal, includeGeneration: true, headedManagedAutosaveInterval: ownedManagedSession?.headedManagedAutosaveInterval ?? (ownedManagedSession?.headedManagedAutosaveDisabled ? "0" : undefined), timeoutMs: params.timeoutMs });
+			sessionPageState.bindSnapshotGeneration(sessionStateKey, daemon.status === "active" ? daemon.generation : undefined);
+			if (daemon.status !== "active" || daemon.generation === undefined || priorRefSnapshotState.generation !== daemon.generation) {
+				nativeGenerationChanged = daemon.status === "active" && daemon.generation !== undefined && priorRefSnapshotState.generation !== undefined && priorRefSnapshotState.generation !== daemon.generation;
+				priorRefSnapshotState = undefined;
+				priorRefSnapshotInvalidation = buildPageTransitionRefSnapshotInvalidation("The native browser generation changed or could not be verified. Take a new complete snapshot before using refs, even when the URL is unchanged.");
+				sessionPageState.applyRefSnapshotInvalidation({ invalidation: priorRefSnapshotInvalidation, sessionName: sessionStateKey, update: options.sessionPageStateUpdate });
+			}
+		}
+		const coldManagedSession = !browserIndependent && (managedSessionDaemonInactive || nativeGenerationChanged || priorSessionPageState.tabReopenPending === true)
 			&& recordedOwnedSession !== undefined
 			&& sessionTabPinningReason === "restore"
 			&& ownedManagedSession?.restoreDecision === "enabled"
@@ -1043,7 +1055,15 @@ export async function prepareBrowserRun(options: BrowserRunOptions): Promise<Pre
 			signal,
 			usedImplicitSession: executionPlan.usedImplicitSession,
 		});
-		if (snapshotFilter) return { kind: "early-result", statePatch: { ...statePatch, artifactManifest: snapshotFilter.artifactManifest ?? statePatch.artifactManifest }, result: snapshotFilter.result };
+		if (snapshotFilter) {
+			if (sessionStateKey && executionPlan.sessionName) {
+				const daemon = await inspectManagedSessionDaemon({ cwd, namespace: executionPlan.namespace, sessionName: executionPlan.sessionName, signal, includeGeneration: true, headedManagedAutosaveInterval: ownedManagedSession?.headedManagedAutosaveInterval ?? (ownedManagedSession?.headedManagedAutosaveDisabled ? "0" : undefined), timeoutMs: params.timeoutMs });
+				sessionPageState.bindSnapshotGeneration(sessionStateKey, daemon.status === "active" ? daemon.generation : undefined);
+				if (ownedManagedSession && daemon.status === "active" && daemon.generation) state.managedSessionRestoreState.recordDaemonRestoreKey(executionPlan.sessionName, executionPlan.namespace, daemon.restoreKey, daemon.generation);
+				if (isRecord(snapshotFilter.result.details)) snapshotFilter.result.details.refSnapshot = sessionPageState.get(sessionStateKey).refSnapshot;
+			}
+			return { kind: "early-result", statePatch: { ...statePatch, artifactManifest: snapshotFilter.artifactManifest ?? statePatch.artifactManifest }, result: snapshotFilter.result };
+		}
 
 		const networkRequestsPageFilter = await tryNetworkRequestsPageFilter({
 			commandTokens,

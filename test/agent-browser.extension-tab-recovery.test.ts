@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -238,6 +238,11 @@ if (args.includes("click")) {
 
 	try {
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+			const seed = createExtensionHarness({ cwd: tempDir });
+			const capture = await executeRegisteredTool(seed.tool, seed.ctx, { args: ["--session", "named", "snapshot", "-i"] });
+			assert.equal(capture.isError, false, JSON.stringify(capture));
+			await writeFile(statePath, JSON.stringify({ targetGone: false, active: false }));
+			await writeFile(logPath, "");
 			const resumedHarness = createExtensionHarness({
 				branch: [
 					createToolBranchEntry({
@@ -254,6 +259,7 @@ if (args.includes("click")) {
 							args: ["--session", "named", "snapshot", "-i"],
 							command: "snapshot",
 							refSnapshot: {
+								...(capture.details?.refSnapshot as object),
 								refIds: ["e9"],
 								refs: { e9: { role: "link", name: "Existing" } },
 								target: { title: "Example Domain", url: "https://example.com/" },
@@ -300,10 +306,8 @@ if (args.includes("click")) {
 			assert.equal(staleRefRetry.isError, true, JSON.stringify(staleRefRetry));
 			assert.equal(staleRefRetry.details?.failureCategory, "stale-ref");
 			assert.match((staleRefRetry.content[0] as { text: string }).text, /current session target is about:blank/);
-			assert.deepEqual((staleRefRetry.details?.refSnapshot as { target?: unknown } | undefined)?.target, {
-				title: "Example Domain",
-				url: "https://example.com/",
-			});
+			assert.equal(staleRefRetry.details?.refSnapshot, undefined);
+			assert.match(String((staleRefRetry.details?.refSnapshotInvalidation as { summary?: string })?.summary), /snapshot for https:\/\/example\.com\/.*target is about:blank/);
 
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.some((entry) => entry.args.includes("batch")), false);
@@ -418,7 +422,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			const opened = await executeRegisteredTool(first.tool, first.ctx, { args: ["open", "https://example.com/old"], sessionMode: "fresh" });
 			assert.equal(opened.isError, false, JSON.stringify(opened));
 			await rm(statePath);
-			const resumed = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details!, isError: opened.isError })] });
+			const resumed = createExtensionHarness({ cwd: tempDir, branch: [...first.ctx.sessionManager.getBranch()] });
 			await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
 			for (const params of [
 				{ qa: { attached: true } },

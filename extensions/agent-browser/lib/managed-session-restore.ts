@@ -26,6 +26,7 @@ import {
 	resolveManagedSessionRestoreHome,
 } from "./managed-session-storage.js";
 import { parseUserBatchStdin } from "./orchestration/batch-stdin.js";
+import { isRecord } from "./parsing.js";
 import { getAgentBrowserProcessEnvironment } from "./process-environment.js";
 
 export { createManagedSessionRestoreKey, ensureManagedSessionRestoreStorageIsSecure, getManagedSessionRestoreScope } from "./managed-session-storage.js";
@@ -52,7 +53,7 @@ export interface ManagedSessionRestoreIdentity {
 }
 
 export class ManagedSessionRestoreState {
-	readonly #daemonRestoreKeys = new Map<string, string | null>();
+	readonly #daemonRestoreKeys = new Map<string, { restoreKey: string | null; generation?: string; restored?: true }>();
 	readonly #disabled = new Set<string>();
 
 	clear(sessionName?: string, namespace?: string): void {
@@ -71,11 +72,12 @@ export class ManagedSessionRestoreState {
 	}
 
 	getDaemonRestoreKey(sessionName: string | undefined, namespace?: string): string | null | undefined {
-		return typeof sessionName === "string" ? this.#daemonRestoreKeys.get(getAgentBrowserSessionIdentityKey(sessionName, namespace)) : undefined;
+		return typeof sessionName === "string" ? this.#daemonRestoreKeys.get(getAgentBrowserSessionIdentityKey(sessionName, namespace))?.restoreKey : undefined;
 	}
 
 	hasDaemonRestoreKey(sessionName: string | undefined, namespace?: string): boolean {
-		return typeof sessionName === "string" && this.#daemonRestoreKeys.has(getAgentBrowserSessionIdentityKey(sessionName, namespace));
+		return typeof sessionName === "string" && this.#daemonRestoreKeys.get(getAgentBrowserSessionIdentityKey(sessionName, namespace))?.restored !== true
+			&& this.#daemonRestoreKeys.has(getAgentBrowserSessionIdentityKey(sessionName, namespace));
 	}
 
 	forgetDaemonRestoreKey(sessionName: string | undefined, namespace?: string): void {
@@ -86,8 +88,24 @@ export class ManagedSessionRestoreState {
 		return typeof sessionName === "string" && this.#disabled.has(getAgentBrowserSessionIdentityKey(sessionName, namespace));
 	}
 
-	recordDaemonRestoreKey(sessionName: string | undefined, namespace: string | undefined, restoreKey: string | null): void {
-		if (sessionName) this.#daemonRestoreKeys.set(getAgentBrowserSessionIdentityKey(sessionName, namespace), restoreKey);
+	recordDaemonRestoreKey(sessionName: string | undefined, namespace: string | undefined, restoreKey: string | null, generation?: string): void {
+		if (sessionName) {
+			const key = getAgentBrowserSessionIdentityKey(sessionName, namespace);
+			const previous = this.#daemonRestoreKeys.get(key);
+			this.#daemonRestoreKeys.set(key, { restoreKey, generation: generation ?? (previous?.restoreKey === restoreKey ? previous.generation : undefined) });
+		}
+	}
+
+	getDaemonReceipt(sessionName: string | undefined, namespace?: string): { restoreKey: string | null; generation: string } | undefined {
+		const receipt = sessionName ? this.#daemonRestoreKeys.get(getAgentBrowserSessionIdentityKey(sessionName, namespace)) : undefined;
+		return receipt?.generation ? { restoreKey: receipt.restoreKey, generation: receipt.generation } : undefined;
+	}
+
+	restoreDaemonReceipt(sessionName: string, namespace: string | undefined, receipt: unknown): void {
+		if (isRecord(receipt) && typeof receipt.generation === "string" && receipt.generation.length > 0
+			&& (receipt.restoreKey === null || typeof receipt.restoreKey === "string")) {
+			this.#daemonRestoreKeys.set(getAgentBrowserSessionIdentityKey(sessionName, namespace), { restoreKey: receipt.restoreKey, generation: receipt.generation, restored: true });
+		}
 	}
 
 	replace(identities: ManagedSessionRestoreIdentity[] = [], options: { preserveDaemonRestoreKeys?: boolean } = {}): void {

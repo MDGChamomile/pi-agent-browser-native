@@ -28,12 +28,14 @@
   },
   "bin": {
     "pi-agent-browser-config": "scripts/config.mjs",
+    "pi-agent-browser-convert": "scripts/convert-browser-session.mjs",
     "pi-agent-browser-doctor": "scripts/doctor.mjs"
   },
   "files": [
     "dist",
     "platform-smoke.config.mjs",
     "scripts/config.mjs",
+    "scripts/convert-browser-session.mjs",
     "scripts/doctor.mjs",
     "scripts/prepare.mjs",
     "scripts/build.mjs",
@@ -48,6 +50,7 @@
     "docs/COMMAND_REFERENCE.md",
     "docs/ELECTRON.md",
     "docs/RELEASE.md",
+    "docs/SESSION_STORAGE.md",
     "docs/platform-smoke.md",
     "docs/REQUIREMENTS.md",
     "docs/SUPPORT_MATRIX.md",
@@ -65,14 +68,14 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-tui": "0.99.1",
     "@types/cross-spawn": "6.0.6",
     "@types/node": "24.19.0",
     "@types/which": "2.0.2",
     "tsx": "4.23.15",
-    "typebox": "1.3.34",
+    "typebox": "1.3.27",
     "typescript": "7.0.2"
   },
   "scripts": {
@@ -113,6 +116,7 @@
   "dependencies": {
     "cross-spawn": "7.0.6",
     "path-key": "3.1.1",
+    "stream-json": "3.7.0",
     "which": "2.0.2"
   }
 }
