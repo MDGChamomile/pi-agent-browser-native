@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -77,7 +77,7 @@ if (args.includes("tab") && args.includes("list")) {
 			});
 
 			const invocations = await readInvocationLog(logPath);
-			assert.equal(invocations.length, 3);
+			assert.equal(invocations.length, 4);
 			assert.deepEqual(invocations[0]?.args, [
 				"--json",
 				"--session",
@@ -89,6 +89,7 @@ if (args.includes("tab") && args.includes("list")) {
 			]);
 			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "tab", "list"]);
 			assert.deepEqual(invocations[2]?.args, ["--json", "--session", "named", "tab", "t1"]);
+			assert.deepEqual(invocations[3]?.args, ["--json", "--session", "named", "tab", "list"]);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -237,6 +238,11 @@ if (args.includes("click")) {
 
 	try {
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+			const seed = createExtensionHarness({ cwd: tempDir });
+			const capture = await executeRegisteredTool(seed.tool, seed.ctx, { args: ["--session", "named", "snapshot", "-i"] });
+			assert.equal(capture.isError, false, JSON.stringify(capture));
+			await writeFile(statePath, JSON.stringify({ targetGone: false, active: false }));
+			await writeFile(logPath, "");
 			const resumedHarness = createExtensionHarness({
 				branch: [
 					createToolBranchEntry({
@@ -253,6 +259,7 @@ if (args.includes("click")) {
 							args: ["--session", "named", "snapshot", "-i"],
 							command: "snapshot",
 							refSnapshot: {
+								...(capture.details?.refSnapshot as object),
 								refIds: ["e9"],
 								refs: { e9: { role: "link", name: "Existing" } },
 								target: { title: "Example Domain", url: "https://example.com/" },
@@ -299,10 +306,8 @@ if (args.includes("click")) {
 			assert.equal(staleRefRetry.isError, true, JSON.stringify(staleRefRetry));
 			assert.equal(staleRefRetry.details?.failureCategory, "stale-ref");
 			assert.match((staleRefRetry.content[0] as { text: string }).text, /current session target is about:blank/);
-			assert.deepEqual((staleRefRetry.details?.refSnapshot as { target?: unknown } | undefined)?.target, {
-				title: "Example Domain",
-				url: "https://example.com/",
-			});
+			assert.equal(staleRefRetry.details?.refSnapshot, undefined);
+			assert.match(String((staleRefRetry.details?.refSnapshotInvalidation as { summary?: string })?.summary), /snapshot for https:\/\/example\.com\/.*target is about:blank/);
 
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.some((entry) => entry.args.includes("batch")), false);
@@ -414,10 +419,10 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
 			const first = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
-			const opened = await executeRegisteredTool(first.tool, first.ctx, { args: ["open", "https://example.com/old"] });
+			const opened = await executeRegisteredTool(first.tool, first.ctx, { args: ["open", "https://example.com/old"], sessionMode: "fresh" });
 			assert.equal(opened.isError, false, JSON.stringify(opened));
 			await rm(statePath);
-			const resumed = createExtensionHarness({ cwd: tempDir, branch: [createToolBranchEntry({ details: opened.details!, isError: opened.isError })] });
+			const resumed = createExtensionHarness({ cwd: tempDir, branch: [...first.ctx.sessionManager.getBranch()] });
 			await runExtensionEvent(resumed.handlers, "session_start", { reason: "resume" }, resumed.ctx);
 			for (const params of [
 				{ qa: { attached: true } },
@@ -513,8 +518,9 @@ if (args.includes("tab") && args.includes("list")) {
 
 			const invocations = await readInvocationLog(logPath);
 			assert.deepEqual(invocations[0]?.args, ["--json", "--session", "named", "open", "about:blank"]);
-			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "get", "url"]);
-			assert.deepEqual(invocations[2]?.args, ["--json", "--session", "named", "snapshot", "-i"]);
+			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "tab", "list"]);
+			assert.deepEqual(invocations[2]?.args, ["--json", "--session", "named", "get", "url"]);
+			assert.deepEqual(invocations[3]?.args, ["--json", "--session", "named", "snapshot", "-i"]);
 			assert.equal(
 				invocations.some((invocation) => JSON.stringify(invocation.args) === JSON.stringify(["--json", "--session", "named", "tab", "blank"])),
 				false,
@@ -589,9 +595,11 @@ if (args.includes("https://example.com/slow-first")) {
 			assert.equal(fastOpen.details?.sessionTabTargetUnknown, undefined);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.equal(invocations.length, 2);
+			assert.equal(invocations.length, 4);
 			assert.deepEqual(invocations[0]?.args, ["--json", "--session", "named", "open", "https://example.com/slow-first"]);
-			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "open", "https://example.com/fast-second"]);
+			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "tab", "list"]);
+			assert.deepEqual(invocations[2]?.args, ["--json", "--session", "named", "open", "https://example.com/fast-second"]);
+			assert.deepEqual(invocations[3]?.args, ["--json", "--session", "named", "tab", "list"]);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -723,7 +731,10 @@ if (args.includes("get") && args.includes("url")) {
 			const snapshot = executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "named", "snapshot", "-i"] }, controller.signal);
 			await waitForInvocation(logPath, (entry) => entry.args.includes("get") && entry.args.includes("url"));
 			controller.abort(new Error("caller cancelled"));
-			await assert.rejects(snapshot, /caller cancelled/);
+			const cancelled = await snapshot;
+			assert.equal(cancelled.isError, true);
+			assert.equal(cancelled.details?.failureCategory, "aborted");
+			assert.match(cancelled.content[0]?.text ?? "", /caller cancelled/);
 
 			const reopened = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "named", "open", "https://example.com/"] });
 			assert.equal(reopened.isError, false, JSON.stringify(reopened));
@@ -760,8 +771,8 @@ if (args.includes("tab") && args.includes("list")) {
   const inactiveSite = activeKey === "example" ? gemini : exampleSite;
   save();
   process.stdout.write(JSON.stringify({ success: true, data: { tabs: [
-    { tabId: activeKey === "example" ? "t1" : "t2", title: activeSite.title, url: activeSite.url, active: true },
-    { tabId: activeKey === "example" ? "t2" : "t1", title: inactiveSite.title, url: inactiveSite.url, active: false }
+    { tabId: activeKey === "example" ? "t1" : "t2", targetId: activeKey === "example" ? "TARGET_A" : "TARGET_B", title: activeSite.title, url: activeSite.url, active: true },
+    { tabId: activeKey === "example" ? "t2" : "t1", targetId: activeKey === "example" ? "TARGET_B" : "TARGET_A", title: inactiveSite.title, url: inactiveSite.url, active: false }
   ] } }));
 } else if (args.includes("click")) {
   state.active = "gemini";
@@ -807,12 +818,13 @@ if (args.includes("tab") && args.includes("list")) {
 			});
 
 			const invocations = await readInvocationLog(logPath);
-			assert.equal(invocations.length, 5);
+			assert.equal(invocations.length, 6);
 			assert.deepEqual(invocations[0]?.args, ["--json", "--session", "named", "tab", "list"]);
 			assert.deepEqual(invocations[1]?.args, ["--json", "--session", "named", "get", "url"]);
 			assert.deepEqual(invocations[2]?.args, ["--json", "--session", "named", "click", "@e9"]);
 			assert.deepEqual(invocations[3]?.args, ["--json", "--session", "named", "tab", "list"]);
-			assert.deepEqual(invocations[4]?.args, ["--json", "--session", "named", "tab", "t1"]);
+			assert.deepEqual(invocations[4]?.args, ["--json", "--session", "named", "tab", "list"]);
+			assert.deepEqual(invocations[5]?.args, ["--json", "--session", "named", "tab", "t1"]);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });

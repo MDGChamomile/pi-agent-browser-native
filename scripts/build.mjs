@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Purpose: Produce the compiled runtime files that the published Pi package loads.
- * Responsibilities: Remove stale dist output, run TypeScript emit through the local compiler, and fail with clear build output.
+ * Responsibilities: Remove stale dist output, run TypeScript emit, and fail with clear build output.
  * Scope: Maintainer/package build only; runtime behavior remains in extensions/agent-browser TypeScript sources.
  * Usage: `npm run build` before package verification, lifecycle validation, and npm pack/publish.
- * Invariants/Assumptions: `node_modules` is installed and provides `typescript`; deleting `dist/` is safe because it is generated output.
+ * Invariants/Assumptions: `node_modules` provides `typescript`; Termux supplies Android-native `tsgo` on PATH. `dist/` is generated output.
  */
 
 import { execFile as execFileCallback } from "node:child_process";
@@ -15,7 +15,8 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 const binSuffix = process.platform === "win32" ? ".cmd" : "";
-const tscPath = join(process.cwd(), "node_modules", ".bin", `tsc${binSuffix}`);
+// TypeScript's npm binaries do not support Android; Termux supplies native tsgo.
+const tscPath = process.platform === "android" ? "tsgo" : join(process.cwd(), "node_modules", ".bin", `tsc${binSuffix}`);
 
 async function main() {
 	await rm(join(process.cwd(), "dist"), { force: true, maxRetries: 5, recursive: true, retryDelay: 100 });

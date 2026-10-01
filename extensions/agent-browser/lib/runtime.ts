@@ -9,6 +9,7 @@ import {
 	type CommandInfo,
 } from "./argv-descriptor.js";
 import { batchHasSuccessfulCloseAll, getSuccessfulBatchCloseLifecycle } from "./batch-lifecycle.js";
+import { getBrowserResultMessage } from "./browser-transcript.js";
 import {
 	canonicalizeAgentBrowserNamespace,
 	extractExplicitNamespace,
@@ -20,11 +21,13 @@ import {
 	isAgentBrowserSessionIdentityKeyInNamespace,
 	isUpstreamEnvFlagEnabled,
 	PREVALIDATED_VALUE_FLAGS,
+	projectUpstreamGlobalFlags,
 	resolveAgentBrowserNamespace,
 	scanUpstreamGlobalFlagOccurrences,
 	stripUpstreamGlobalFlags,
 } from "./argv-grammar.js";
 import { needsManagedSession } from "./command-policy.js";
+import { parseBatchCommandArgument } from "./orchestration/batch-stdin.js";
 import { isCloseAllCommand, isCloseCommand, isOpenNavigationCommand } from "./command-taxonomy.js";
 import {
 	hasLaunchScopedFlagToken,
@@ -49,11 +52,13 @@ const AGENT_BROWSER_IDLE_TIMEOUT_ENV = "AGENT_BROWSER_IDLE_TIMEOUT_MS";
 const IMPLICIT_SESSION_IDLE_TIMEOUT_ENV = "PI_AGENT_BROWSER_IMPLICIT_SESSION_IDLE_TIMEOUT_MS";
 const IMPLICIT_SESSION_CLOSE_TIMEOUT_ENV = "PI_AGENT_BROWSER_IMPLICIT_SESSION_CLOSE_TIMEOUT_MS";
 const DEFAULT_IMPLICIT_SESSION_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
-const DEFAULT_IMPLICIT_SESSION_CLOSE_TIMEOUT_MS = 5_000;
+// Native close includes a five-second Chrome exit grace after protocol shutdown.
+// Use the normal CLI watchdog budget rather than interrupting that grace.
+const DEFAULT_IMPLICIT_SESSION_CLOSE_TIMEOUT_MS = 35_000;
 const INSPECTION_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 const SENSITIVE_VALUE_FLAGS = new Set(["--body", "--headers", "--password", "--proxy"]);
 const SENSITIVE_QUERY_PARAM_PATTERN =
-	/^(?:access(?:_|-)?token|api(?:_|-)?key|auth|authorization|bearer|client(?:_|-)?secret|code|cookie|id(?:_|-)?token|key|pass(?:word)?|refresh(?:_|-)?token|relay(?:_|-)?state|saml(?:_|-)?request|saml(?:_|-)?response|secret|sentry(?:_|-)?key|session(?:_|-)?id|sig(?:nature)?|token|write(?:_|-)?key)$/i;
+	/^(?:access(?:_|-)?token|api(?:_|-)?key|auth|authorization|authorization(?:_|-)?session(?:_|-)?id|bearer|client(?:_|-)?secret|code|cookie|id(?:_|-)?token|key|pass(?:word)?|refresh(?:_|-)?token|relay(?:_|-)?state|saml(?:_|-)?request|saml(?:_|-)?response|secret|sentry(?:_|-)?key|session(?:_|-)?id|sig(?:nature)?|token|write(?:_|-)?key)$/i;
 const AUTH_STATE_QUERY_PARAM_PATTERN = /^(?:nonce|state)$/i;
 const AUTH_URL_CONTEXT_PATTERN = /(?:^|[./_-])(?:auth|authorize|callback|login|oauth2?|oidc|saml|sso)(?:[./?#_-]|$)/i;
 const SENSITIVE_FIELD_NAME_PATTERN =
@@ -96,7 +101,7 @@ export interface CompatibilityWorkaround {
 
 export interface OpenResultTabCorrection {
 	selectedTab: string;
-	selectionKind: "index" | "label" | "tabId";
+	selectionKind: "index" | "label" | "tabId" | "targetId";
 	targetTitle?: string;
 	targetUrl: string;
 }
@@ -145,6 +150,7 @@ function redactUrlToken(token: string): string {
 		return token;
 	}
 
+	const originalHref = parsed.href;
 	if (parsed.username.length > 0) parsed.username = "[REDACTED]";
 	if (parsed.password.length > 0) parsed.password = "[REDACTED]";
 
@@ -169,7 +175,7 @@ function redactUrlToken(token: string): string {
 		if (hashMutated) parsed.hash = `#${hashParams.toString()}`;
 	}
 
-	return parsed.toString();
+	return parsed.href === originalHref ? token : parsed.href;
 }
 
 function redactLooseUrlParameterText(text: string): string {
@@ -204,52 +210,85 @@ function redactLooseUrlMatches(text: string): string {
 	return text.replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`<>\])]+/g, (match) => redactUrlToken(match));
 }
 
-function findBalancedJsonEnd(text: string, startIndex: number): number | undefined {
-	const opener = text[startIndex];
-	const closer = opener === "{" ? "}" : opener === "[" ? "]" : undefined;
-	if (!closer) return undefined;
-	const stack = [closer];
-	let inString = false;
-	let escaped = false;
-	for (let index = startIndex + 1; index < text.length; index += 1) {
-		const char = text[index];
-		if (inString) {
-			if (escaped) {
-				escaped = false;
-				continue;
+function createBalancedJsonEndFinder(text: string): (startIndex: number) => number | undefined {
+	let boundaries: Int32Array | undefined;
+	return (startIndex) => {
+		const opener = text[startIndex];
+		if (opener !== "{" && opener !== "[") return undefined;
+		if (!boundaries) {
+			// Resolve each suffix once: skip strings and balanced groups to its first unmatched closer.
+			boundaries = new Int32Array(text.length + 1).fill(-1);
+			let quoteAtNext = -1;
+			let quoteAfterNext = -1;
+			for (let index = text.length - 1; index >= 0; index -= 1) {
+				const char = text[index];
+				if (char === "}" || char === "]") {
+					boundaries[index] = index;
+				} else if (char === '"') {
+					boundaries[index] = quoteAtNext < 0 ? -1 : boundaries[quoteAtNext + 1];
+				} else if (char === "{" || char === "[") {
+					const end = boundaries[index + 1];
+					boundaries[index] = end >= 0 && text[end] === (char === "{" ? "}" : "]") ? boundaries[end + 1] : -1;
+				} else {
+					boundaries[index] = boundaries[index + 1];
+				}
+				// Inside a string, backslash skips one character; outside, it is ordinary text.
+				const quote = char === '"' ? index : char === "\\" ? quoteAfterNext : quoteAtNext;
+				quoteAfterNext = quoteAtNext;
+				quoteAtNext = quote;
 			}
-			if (char === "\\") {
-				escaped = true;
-				continue;
-			}
-			if (char === '"') {
-				inString = false;
-			}
-			continue;
 		}
-		if (char === '"') {
-			inString = true;
-			continue;
-		}
-		if (char === "{") {
-			stack.push("}");
-			continue;
-		}
-		if (char === "[") {
-			stack.push("]");
-			continue;
-		}
-		if (char === "}" || char === "]") {
-			if (stack.pop() !== char) return undefined;
-			if (stack.length === 0) return index;
-		}
+		const end = boundaries[startIndex + 1];
+		return end >= 0 && text[end] === (opener === "{" ? "}" : "]") ? end : undefined;
+	};
+}
+
+function redactSerializedJson(text: string): string | undefined {
+	// Validate grammar only; rebuilding parsed values loses duplicates and numeric spelling.
+	try {
+		JSON.parse(text);
+	} catch {
+		return undefined;
 	}
-	return undefined;
+	let output = "";
+	let cursor = 0;
+	const findEnd = createBalancedJsonEndFinder(text);
+	const strings = /"(?:\\.|[^"\\])*"/g;
+	let match: RegExpExecArray | null;
+	while ((match = strings.exec(text)) !== null) {
+		const end = strings.lastIndex;
+		const value = JSON.parse(match[0]) as string;
+		const redacted = redactSensitiveText(value);
+		if (redacted !== value) {
+			output += text.slice(cursor, match.index) + JSON.stringify(redacted);
+			cursor = end;
+		}
+		const separator = /^\s*:\s*/.exec(text.slice(end));
+		if (!separator || !isSensitiveFieldName(value)) continue;
+		const valueStart = end + separator[0].length;
+		let valueEnd = findEnd(valueStart);
+		if (valueEnd !== undefined) {
+			valueEnd += 1;
+		} else if (text[valueStart] === '"') {
+			strings.lastIndex = valueStart;
+			const fieldValue = strings.exec(text)!;
+			valueEnd = strings.lastIndex;
+			if (JSON.parse(fieldValue[0]) === "[REDACTED]") continue;
+		} else {
+			valueEnd = valueStart;
+			while (valueEnd < text.length && !/[\s,\]}]/.test(text[valueEnd])) valueEnd += 1;
+		}
+		output += text.slice(cursor, valueStart) + '"[REDACTED]"';
+		cursor = valueEnd;
+		strings.lastIndex = valueEnd;
+	}
+	return output + text.slice(cursor);
 }
 
 function redactEmbeddedStructuredText(text: string): string {
 	let output = "";
 	let cursor = 0;
+	const findEnd = createBalancedJsonEndFinder(text);
 	while (cursor < text.length) {
 		const char = text[cursor];
 		if (char !== "{" && char !== "[") {
@@ -257,21 +296,14 @@ function redactEmbeddedStructuredText(text: string): string {
 			cursor += 1;
 			continue;
 		}
-		const endIndex = findBalancedJsonEnd(text, cursor);
+		const endIndex = findEnd(cursor);
 		if (endIndex === undefined) {
 			output += char;
 			cursor += 1;
 			continue;
 		}
 		const candidate = text.slice(cursor, endIndex + 1);
-		try {
-			const parsed = JSON.parse(candidate) as unknown;
-			const redacted = typeof parsed === "string" ? redactSensitiveText(parsed) : JSON.stringify(redactSensitiveValue(parsed));
-			const original = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
-			output += redacted === original ? candidate : redacted;
-		} catch {
-			output += candidate;
-		}
+		output += redactSerializedJson(candidate) ?? candidate;
 		cursor = endIndex + 1;
 	}
 	return output;
@@ -285,11 +317,7 @@ function redactStandaloneBasicCredential(text: string): string {
 }
 
 function credentialTrailingPunctuation(credential: string): string {
-	return credential.match(/^(.+?)([,.]+)$/)?.[2] ?? "";
-}
-
-function isBearerHelpPlaceholder(label: string, credential: string, trailing: string): boolean {
-	return label.toLowerCase() === "authorization bearer" && credential.toLowerCase() === "token" && trailing === ")";
+	return credential.match(/[,.:;!?]+$/)?.[0] ?? "";
 }
 
 function formatRedactedCredential(label: string, credential: string, trailing = ""): string {
@@ -298,11 +326,14 @@ function formatRedactedCredential(label: string, credential: string, trailing = 
 
 function redactBearerCredentials(text: string): string {
 	return text
-		.replace(/\b(Authorization\s*:\s*Bearer)\s+([^\s"',)\[\]]+)([),.]?)/gi, (_match, label: string, credential: string, trailing: string) => {
+		.replace(/((?:\b([A-Za-z][A-Za-z0-9_-]*)\s*[:=]\s*|(?:^|\s)(?:-H\s*|--header(?:\s+|=)))["']?Bearer)\s+([^\s"',)\[\]]+)([),.]?)/gi, (match, label: string, field: string | undefined, credential: string, trailing: string) => {
+			if (field && !isSensitiveFieldName(field)) return match;
 			return formatRedactedCredential(label, credential, trailing);
 		})
-		.replace(/\b((?:Authorization\s+)?Bearer)\s+([^\s"',)\[\]]+)([),.]?)/gi, (match, label: string, credential: string, trailing: string) => {
-			if (isBearerHelpPlaceholder(label, credential, trailing)) return match;
+		.replace(/\b(Bearer)\s+([^\s\\"',)\[\]]+)([),.]?)/gi, (match, label: string, credential: string, trailing: string) => {
+			// Without a credential field/header, require a bearer-token shape, not prose, HTML or a URL.
+			const token = credential.slice(0, credential.length - credentialTrailingPunctuation(credential).length);
+			if (!/^[A-Za-z0-9._~+/-]+=*$/.test(token) || !/[0-9._~+/=-]/.test(token)) return match;
 			return formatRedactedCredential(label, credential, trailing);
 		});
 }
@@ -314,22 +345,37 @@ export function isSensitiveFieldName(key: string): boolean {
 
 function isEnvSecretAssignmentKey(key: string): boolean {
 	if (!isSensitiveFieldName(key)) return false;
-	if (key.includes("_") || key.includes("-") || key === key.toUpperCase()) return true;
+	if (key === "password" || key.includes("_") || key.includes("-") || key === key.toUpperCase()) return true;
 	return /(?:apiKey|ApiKey|privateKey|PrivateKey|databaseUrl|DatabaseUrl|dbUrl|DbUrl|connectionString|ConnectionString|mongoUri|MongoUri|mongodbUri|MongodbUri|mongoDbUri|MongoDbUri|redisUrl|RedisUrl|Token|Secret|Password|Credential|Credentials)$/.test(key);
 }
 
 function redactEnvSecretAssignments(text: string): string {
-	return text.replace(ENV_SECRET_ASSIGNMENT_PATTERN, (match, prefix: string, key: string) => {
+	return text.replace(ENV_SECRET_ASSIGNMENT_PATTERN, (match, prefix: string, key: string, _separator: string, offset: number) => {
 		if (!isEnvSecretAssignmentKey(key)) return match;
+		if (key === "password") {
+			// The loose matcher cannot safely distinguish inline punctuation from password characters.
+			const end = offset + match.length;
+			if ((offset > 0 && text[offset - 1] !== "\n" && text[offset - 1] !== "\r")
+				|| (end < text.length && text[end] !== "\n" && text[end] !== "\r")
+				|| /^(?:\[REDACTED\]|%5Bredacted%5D)/i.test(match.slice(prefix.length))) return match;
+			const value = match.slice(prefix.length);
+			const boundary = value[0] === '"' || value[0] === "'" ? -1 : value.search(/[&#](?=[A-Za-z_][A-Za-z0-9_-]*\s*=)/);
+			return `${prefix}[REDACTED]${boundary < 0 ? "" : value.slice(boundary)}`;
+		}
 		return `${prefix}[REDACTED]`;
 	});
 }
 
 export function redactSensitiveText(text: string): string {
+	// Redact JSON string literals before text heuristics can consume their escapes.
+	// Non-JSON stays whole so assignments and headers retain their credential context.
+	const serialized = redactSerializedJson(text);
+	if (serialized !== undefined) return serialized;
+	const embeddedRedactedText = redactEmbeddedStructuredText(text);
 	return redactEmbeddedStructuredText(
 		redactEnvSecretAssignments(
 			redactStandaloneBasicCredential(
-				redactBearerCredentials(redactLooseUrlParameterText(redactLooseUrlUserinfo(redactLooseUrlMatches(text))))
+				redactBearerCredentials(redactLooseUrlParameterText(redactLooseUrlUserinfo(redactLooseUrlMatches(embeddedRedactedText))))
 					.replace(/\b(Authorization\s*:\s*Basic)\s+[^\s",]+/gi, "$1 [REDACTED]")
 					.replace(/\b(Cookie|Set-Cookie)\s*:\s*[^\n\r"]+/gi, "$1: [REDACTED]"),
 			),
@@ -418,6 +464,16 @@ export function redactInvocationArgs(args: string[]): string[] {
 		}
 	}
 
+	const batch = projectUpstreamGlobalFlags(args);
+	if (batch.tokens[0] === "batch") {
+		for (let index = 1; index < batch.tokens.length; index++) {
+			if (batch.tokens[index] === "--bail") continue;
+			const step = parseBatchCommandArgument(batch.tokens[index]).step;
+			if (!step) continue;
+			const safe = redactInvocationArgs(step);
+			if (safe.some((token, offset) => token !== step[offset])) redacted[batch.indices[index]] = safe.map(token => `'${token.replaceAll("'", "'\\''")}'`).join(" ");
+		}
+	}
 	return redacted;
 }
 
@@ -560,11 +616,8 @@ export function restoreManagedSessionStateFromBranch(
 	};
 
 	for (const entry of branch) {
-		if (!isRecord(entry) || entry.type !== "message") {
-			continue;
-		}
-		const message = isRecord(entry.message) ? entry.message : undefined;
-		if (!message || message.toolName !== "agent_browser") {
+		const message = getBrowserResultMessage(entry);
+		if (!message) {
 			continue;
 		}
 		const details = isRecord(message.details) ? message.details : undefined;
@@ -963,11 +1016,13 @@ export function buildExecutionPlan(
 	args: string[],
 	options: {
 		freshSessionName: string;
+		browserIndependentReadConfirmation?: boolean;
 		managedSessionActive: boolean;
 		managedSessionCompatibilityWorkaround?: CompatibilityWorkaround;
 		managedSessionName: string;
 		managedSessionNamespace?: string;
 		sessionMode: SessionMode;
+		stdin?: string;
 	},
 ): ExecutionPlan {
 	const nativeSession = getAgentBrowserProcessEnvironment().AGENT_BROWSER_SESSION;
@@ -980,7 +1035,7 @@ export function buildExecutionPlan(
 	const plainTextInspection = isPlainTextInspectionArgs(args);
 	const argvDescriptor = parseArgvDescriptor(args);
 	const commandInfo = argvDescriptor.commandInfo;
-	const commandNeedsManagedSession = !plainTextInspection && needsManagedSession(argvDescriptor);
+	const commandNeedsManagedSession = !plainTextInspection && !options.browserIndependentReadConfirmation && needsManagedSession(argvDescriptor, options.stdin);
 	const effectiveArgs = plainTextInspection ? [...args] : args.includes("--json") ? [] : ["--json"];
 	let namespace = explicitNamespacePresent ? explicitNamespace ?? "" : undefined;
 	if (plainTextInspection) {
@@ -1078,6 +1133,7 @@ export function buildExecutionPlan(
 	}
 
 	const targetsActiveManagedSession = options.managedSessionActive
+		&& commandNeedsManagedSession
 		&& sessionName
 		&& getAgentBrowserSessionIdentityKey(sessionName, namespace) === getAgentBrowserSessionIdentityKey(options.managedSessionName, options.managedSessionNamespace);
 	if (targetsActiveManagedSession && startupScopedFlags.length > 0 && !isCloseCommand(commandInfo.command) && !validationError) {

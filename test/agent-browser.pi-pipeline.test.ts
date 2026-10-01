@@ -5,14 +5,14 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Type } from "typebox";
 
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
 	createAssistantMessageEventStream,
 	type AssistantMessage,
@@ -31,8 +31,10 @@ import {
 	type AgentSession,
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import * as Pi from "@earendil-works/pi-coding-agent";
 
 import agentBrowserExtension from "../extensions/agent-browser/index.js";
+import { PROJECT_RULE_PROMPT, RUNTIME_PROMPT_GUIDELINES, SHARED_BROWSER_PLAYBOOK_GUIDELINES, ADVANCED_TOOL_PROMPT_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	readInvocationLog,
 	withPatchedEnv,
@@ -42,7 +44,7 @@ import {
 const PIPELINE_PROVIDER = "piab-pipeline";
 const PIPELINE_MODEL_ID = "tool-pipeline";
 
-type PipelineToolResult = ToolResultMessage<unknown> & { toolName: "agent_browser" };
+type PipelineToolResult = ToolResultMessage;
 
 type PipelinePromptResult = {
 	inMemoryResult: PipelineToolResult;
@@ -54,7 +56,8 @@ type PipelinePromptResult = {
 function isAgentBrowserToolResult(message: unknown): message is PipelineToolResult {
 	return typeof message === "object" && message !== null &&
 		(message as { role?: unknown }).role === "toolResult" &&
-		(message as { toolName?: unknown }).toolName === "agent_browser";
+		typeof (message as { toolName?: unknown }).toolName === "string" &&
+		(message as { toolName: string }).toolName.startsWith("agent_browser");
 }
 
 function usage() {
@@ -98,9 +101,9 @@ function streamTextResponse(model: Model<any>, text: string) {
 	return stream;
 }
 
-function createToolCallingStream(toolArguments: Record<string, unknown>, priorCalls: ToolCall[] = []) {
+function createToolCallingStream(toolArguments: ToolCall["arguments"], priorCalls: ToolCall[] = [], toolName = "agent_browser", toolCallId = "call_agent_browser_pipeline") {
 	return (model: Model<any>, context: Context, _options?: SimpleStreamOptions) => {
-		const hasToolResult = context.messages.some((message) => message.role === "toolResult" && message.toolName === "agent_browser");
+		const hasToolResult = context.messages.some((message) => message.role === "toolResult" && message.toolName === toolName);
 		if (hasToolResult) return streamTextResponse(model, "Observed agent_browser result.");
 
 		const stream = createAssistantMessageEventStream();
@@ -108,8 +111,8 @@ function createToolCallingStream(toolArguments: Record<string, unknown>, priorCa
 			const output = createAssistantMessage(model, "toolUse");
 			const toolCall = {
 				arguments: toolArguments,
-				id: "call_agent_browser_pipeline",
-				name: "agent_browser",
+				id: toolCallId,
+				name: toolName,
 				type: "toolCall" as const,
 			};
 			stream.push({ type: "start", partial: output });
@@ -157,7 +160,7 @@ async function readPersistedAgentBrowserResult(sessionDir: string): Promise<{ re
 	return { result, sessionFile };
 }
 
-function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: Record<string, unknown>, priorCalls?: ToolCall[]): Model<any> {
+function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: ToolCall["arguments"], priorCalls?: ToolCall[], toolName?: string, discoveryStream?: ReturnType<typeof createToolCallingStream>): Model<any> {
 	modelRuntime.registerProvider(PIPELINE_PROVIDER, {
 		api: "openai-completions",
 		apiKey: "piab-pipeline-key",
@@ -170,8 +173,9 @@ function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: Rec
 			maxTokens: 4096,
 			name: "Pi Agent Browser Pipeline Test",
 			reasoning: false,
+			...(discoveryStream ? { compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true } } : {}),
 		}],
-		streamSimple: createToolCallingStream(toolArguments, priorCalls),
+		streamSimple: discoveryStream ?? createToolCallingStream(toolArguments, priorCalls, toolName),
 	});
 	const model = modelRuntime.getModel(PIPELINE_PROVIDER, PIPELINE_MODEL_ID);
 	assert.ok(model, "pipeline test model should be registered");
@@ -180,7 +184,9 @@ function registerPipelineProvider(modelRuntime: ModelRuntime, toolArguments: Rec
 
 async function runPipelinePrompt(options: {
 	fakeScript: string;
-	toolArguments: Record<string, unknown>;
+	discoveryStream?: ReturnType<typeof createToolCallingStream>;
+	toolArguments: ToolCall["arguments"];
+	toolName?: string;
 	extensionFactory?: ExtensionFactory;
 	priorCalls?: ToolCall[];
 	runPrompt?: (session: AgentSession) => Promise<void>;
@@ -196,17 +202,22 @@ async function runPipelinePrompt(options: {
 	);
 
 	try {
-		return await withPatchedEnv<PipelinePromptResult>({ PATH: `${tempDir}:${basePath}` }, async () => {
+		return await withPatchedEnv<PipelinePromptResult>({ PATH: `${tempDir}:${basePath}`, ...(options.discoveryStream ? { HOME: join(tempDir, "home") } : {}) }, async () => {
 			const modelRuntime = await ModelRuntime.create({
 				allowModelNetwork: false,
 				credentials: new InMemoryCredentialStore(),
 				modelsPath: null,
 			});
-			const model = registerPipelineProvider(modelRuntime, options.toolArguments, options.priorCalls);
+			const model = registerPipelineProvider(modelRuntime, options.toolArguments, options.priorCalls, options.toolName, options.discoveryStream);
+			const instructionGroups: ExtensionFactory[] = [];
+			if (options.discoveryStream && "instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function") {
+				instructionGroups.push(Pi.instructionGroupsExtension as ExtensionFactory);
+			}
 			const resourceLoader = new DefaultResourceLoader({
 				agentDir: tempDir,
 				cwd: tempDir,
-				extensionFactories: [options.extensionFactory ?? agentBrowserExtension],
+				extensionFactories: options.extensionFactory ? [...instructionGroups, options.extensionFactory] : [],
+				additionalExtensionPaths: options.extensionFactory ? [] : [resolve(".")],
 				noContextFiles: true,
 				noExtensions: true,
 				noPromptTemplates: true,
@@ -214,6 +225,11 @@ async function runPipelinePrompt(options: {
 				noThemes: true,
 			});
 			await resourceLoader.reload();
+			assert.deepEqual(resourceLoader.getExtensions().errors, []);
+			assert.equal(resourceLoader.getExtensions().extensions.length, 1 + instructionGroups.length);
+			if (!options.extensionFactory) {
+				assert.equal(resourceLoader.getExtensions().extensions[0]?.resolvedPath, resolve("dist/extensions/agent-browser/index.js"));
+			}
 			const { session } = await createAgentSession({
 				cwd: tempDir,
 				model,
@@ -222,13 +238,14 @@ async function runPipelinePrompt(options: {
 				settingsManager: SettingsManager.inMemory(),
 				resourceLoader,
 				sessionManager: SessionManager.create(tempDir, sessionDir, { id: "piab-pipeline-session" }),
-				tools: [...(options.priorCalls ?? []).map((call) => call.name), "agent_browser"],
+				tools: options.discoveryStream ? undefined : [...(options.priorCalls ?? []).map((call) => call.name), options.toolName ?? "agent_browser"],
 			});
 			try {
+				await session.bindExtensions({ onError: (error) => { throw new Error(error.error); } });
 				if (options.runPrompt) await options.runPrompt(session);
 				else await session.prompt("Use agent_browser once.");
 				const inMemoryResult = session.messages.find(isAgentBrowserToolResult);
-				assert.ok(inMemoryResult, "agent_browser tool result should be recorded by Pi");
+				assert.ok(inMemoryResult, `agent_browser tool result should be recorded by Pi: ${session.messages.filter(message => message.role === "assistant" && message.errorMessage).map(message => message.role === "assistant" ? message.errorMessage : "").join("; ")}`);
 				const persisted = await readPersistedAgentBrowserResult(sessionDir);
 				return {
 					inMemoryResult,
@@ -244,6 +261,127 @@ async function runPipelinePrompt(options: {
 		await rm(tempDir, { force: true, recursive: true });
 	}
 }
+
+for (const webSearch of ["absent", "startup", "late"] as const) {
+	test(`Pi pipeline reveals complete browser instructions after discovery on a generic prompt before execution (web search: ${webSearch})`, { skip: process.env.PI_AGENT_BROWSER_NATIVE_DISCOVERY !== "1" }, async () => {
+		assert.ok("instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function", "candidate must export its public instruction groups factory");
+		let hookCalls = 0;
+		let executionCalls = 0;
+		let requests = 0;
+		const pipeline = await withPatchedEnv({ EXA_API_KEY: undefined, BRAVE_API_KEY: webSearch === "startup" ? "test-only-key" : undefined, PI_AGENT_BROWSER_CONFIG: undefined }, () => runPipelinePrompt({
+			toolArguments: { args: ["--help"] },
+			extensionFactory(pi) {
+				if (webSearch === "late") pi.on("session_start", async (_event, ctx) => {
+					const directory = join(ctx.cwd, ".pi/config/pi-agent-browser-native");
+					await mkdir(directory, { recursive: true });
+					await writeFile(join(directory, "config.json"), JSON.stringify({ version: 1, webSearch: { braveApiKey: "test-only-key" } }));
+				});
+				agentBrowserExtension(pi, { async beforeExecute() { executionCalls++; } });
+				pi.on("before_agent_start", () => { hookCalls++; });
+			},
+			discoveryStream(model, context, options) {
+				requests++;
+				const names = getCurrentTools(context.messages).map(tool => tool.name);
+				const prompt = getCurrentSystemPrompt(context.messages);
+				if (requests === 1) {
+					assert.deepEqual(names, ["discover_tools"]);
+					assert.ok(!prompt.includes(PROJECT_RULE_PROMPT));
+					return createToolCallingStream({ enable: ["browser"] }, [], "discover_tools", "call_discovery_pipeline")(model, context, options);
+				}
+				const instructions = context.messages.filter(message => message.role === "toolResult" && message.toolName === "discover_tools")
+					.flatMap(message => message.role === "toolResult" ? message.content.filter(part => part.type === "text").map(part => part.text) : []).join("\n");
+				assert.ok(instructions.includes(PROJECT_RULE_PROMPT), "complete instructions must reach the model before execution");
+				for (const guideline of [...RUNTIME_PROMPT_GUIDELINES, ...SHARED_BROWSER_PLAYBOOK_GUIDELINES, ...Object.values(ADVANCED_TOOL_PROMPT_GUIDELINES).flat()]) assert.ok(instructions.includes(guideline), guideline);
+				assert.ok(names.includes("agent_browser"));
+				assert.ok(names.includes("agent_browser_code"));
+				assert.ok(names.includes("agent_browser_tools"));
+				assert.equal(names.includes("agent_browser_web_search"), webSearch !== "absent");
+				assert.ok(!names.includes("agent_browser_qa"), "discovery must not enable advanced tools");
+				assert.equal(hookCalls, 1, "activation must not rerun before_agent_start");
+				if (requests === 2) assert.equal(executionCalls, 0, "instructions precede first execution");
+				return createToolCallingStream({ args: ["--help"] })(model, context, options);
+			},
+			async runPrompt(session) { await session.prompt("Please continue."); },
+			fakeScript: `process.stdout.write("agent-browser help fixture");`,
+		}));
+		assert.equal(requests, 3);
+		assert.equal(executionCalls, 1);
+		assert.equal(pipeline.persistedResult.isError, false);
+		assert.deepEqual(pipeline.invocations.map(({ args }) => args), [["--help"]]);
+	});
+}
+
+test("Pi pipeline refuses same-batch browser execution before discovery instructions are read", { skip: process.env.PI_AGENT_BROWSER_NATIVE_DISCOVERY !== "1" }, async () => {
+	assert.ok("instructionGroupsExtension" in Pi && typeof Pi.instructionGroupsExtension === "function", "candidate must export its public instruction groups factory");
+	let requests = 0;
+	let executionCalls = 0;
+	const pipeline = await runPipelinePrompt({
+		toolArguments: { args: ["--help"] },
+		extensionFactory(pi) { agentBrowserExtension(pi, { async beforeExecute() { executionCalls++; } }); },
+		discoveryStream(model, context, options) {
+			requests++;
+			if (requests === 1) {
+				return createToolCallingStream({ args: ["--help"] }, [
+					{ type: "toolCall", id: "samebatch-discover", name: "discover_tools", arguments: { enable: ["browser"] } },
+				])(model, context, options);
+			}
+			const result = context.messages.filter(isAgentBrowserToolResult).find(message => message.toolName === "agent_browser");
+			assert.equal(result?.isError, true);
+			assert.match(JSON.stringify(result), /prior turn/);
+			assert.equal(executionCalls, 0);
+			return streamTextResponse(model, "Stopped after guarded refusal.");
+		},
+		async runPrompt(session) {
+			const before = session.getActiveToolNames().sort();
+			await session.prompt("Discover and try a premature browser call.");
+			assert.deepEqual(session.getActiveToolNames().sort(), before);
+			assert.ok(!before.includes("agent_browser_qa"));
+		},
+		fakeScript: `throw Error("browser must not dispatch before discovery");`,
+	});
+	assert.equal(requests, 2);
+	assert.equal(pipeline.persistedResult.isError, true);
+	assert.deepEqual(pipeline.invocations, []);
+});
+
+test("Pi pipeline captures the owner cwd before an awaited browser policy without moving native ctx", async () => {
+	let selected = "";
+	let resolutions = 0;
+	const pipeline = await runPipelinePrompt({
+		toolArguments: { args: ["download", "#export", "report.txt"], outputPath: "receipt.json" },
+		extensionFactory(pi) {
+			pi.on("before_agent_start", async (_event, ctx) => {
+				selected = join(ctx.cwd, "operation");
+				await mkdir(selected);
+			});
+			pi.events.on("pi-change-working-dir:resolve-execution-cwd", request => {
+				resolutions++;
+				Object.assign(request as object, { result: { cwd: selected } });
+			});
+			agentBrowserExtension(pi, {
+				async beforeExecute(_id, ctx) {
+					assert.notEqual(ctx.cwd, selected, "Pi's project context is unchanged");
+					await delay(25);
+					selected = ctx.cwd;
+				},
+			});
+		},
+		fakeScript: `const fs = require("node:fs"), path = require("node:path"), args = process.argv.slice(2);
+const index = args.indexOf("download");
+let data = { title: "Fixture", url: "https://fixture.example.test/" };
+if (index >= 0) {
+  const target = args[index + 2];
+  if (fs.realpathSync(path.dirname(target)) !== fs.realpathSync(path.join(process.cwd(), "operation"))) throw Error("Operation root moved across policy await");
+  fs.writeFileSync(target, "captured B");
+  data = { path: target };
+}
+process.stdout.write(JSON.stringify({ success: true, data }));`,
+	});
+	assert.equal(resolutions, 1);
+	assert.equal(pipeline.persistedResult.isError, false, JSON.stringify(pipeline.persistedResult.content));
+	const details = pipeline.persistedResult.details as { outputFile: { absolutePath: string } };
+	assert.ok(details.outputFile.absolutePath.endsWith(join("operation", "receipt.json")));
+});
 
 test("Pi pipeline awaits beforeExecute after earlier sibling writes and before browser effects", async () => {
 	const capturedIds: string[] = [];
@@ -284,11 +422,12 @@ process.stdout.write(JSON.stringify({ success: true, data: { title: "Fixture", u
 	assert.equal(pipeline.invocations.filter(({ args }) => args.includes("open")).length, 1);
 });
 
-test("Pi pipeline captures script-created files before the next inner dispatch using the outer call ID", async () => {
+test("Pi pipeline captures code-created files before the next inner dispatch using the outer call ID", async () => {
 	const capturedIds: string[] = [];
 	const signals: AbortSignal[] = [];
 	const pipeline = await runPipelinePrompt({
-		toolArguments: { script: `emit(await Promise.all([
+		toolName: "agent_browser_code",
+		toolArguments: { code: `emit(await Promise.all([
   browser({ args: ["download", "#export", "report.txt"] }),
   browser({ args: ["open", "https://fixture.example.test/effect"] })
 ]));` },
@@ -315,21 +454,22 @@ process.stdout.write(JSON.stringify({ success: true, data: { path: "report.txt",
 	assert.deepEqual(capturedIds, ["call_agent_browser_pipeline", "call_agent_browser_pipeline"]);
 	assert.notEqual(signals[0], signals[1], "each inner dispatch supplies its own abort signal");
 	assert.equal(pipeline.inMemoryResult.isError, false, JSON.stringify(pipeline.inMemoryResult.content));
-	const details = pipeline.persistedResult.details as { data: Array<{ ok: boolean }> };
-	assert.deepEqual(details.data.map((result) => result.ok), [true, true]);
+	const details = pipeline.persistedResult.details as { data: Array<{ success: boolean }> };
+	assert.deepEqual(details.data.map((result) => result.success), [true, true]);
 	assert.equal(pipeline.invocations.filter(({ args }) => args.includes("download")).length, 1);
 	assert.equal(pipeline.invocations.filter(({ args }) => args.includes("open")).length, 1);
-	assert.equal(pipeline.invocations.filter(({ args }) => args.includes("close")).length, 1);
+	assert.equal(pipeline.invocations.filter(({ args }) => args.includes("close")).length, 0);
 });
 
-for (const script of [false, true]) {
-	test(`Pi Stop cancels a pending beforeExecute without dispatching ${script ? "script" : "direct"} browser effects`, { timeout: 15_000 }, async () => {
+for (const code of [false, true]) {
+	test(`Pi Stop cancels a pending beforeExecute without dispatching ${code ? "code" : "direct"} browser effects`, { timeout: 15_000 }, async () => {
 		let notifyEntered!: () => void;
 		const entered = new Promise<void>((resolve) => { notifyEntered = resolve; });
 		let hookSignal: AbortSignal | undefined;
 		const pipeline = await runPipelinePrompt({
-			toolArguments: script
-				? { script: `await browser({ args: ["open", "https://fixture.example.test/effect"] });` }
+			toolName: code ? "agent_browser_code" : "agent_browser",
+			toolArguments: code
+				? { code: `await browser({ args: ["open", "https://fixture.example.test/effect"] });` }
 				: { args: ["open", "https://fixture.example.test/effect"] },
 			extensionFactory(pi) {
 				agentBrowserExtension(pi, {
@@ -356,7 +496,7 @@ for (const script of [false, true]) {
 		assert.equal(hookSignal?.aborted, true);
 		assert.equal(pipeline.persistedResult.isError, true);
 		assert.equal(pipeline.invocations.filter(({ args }) => args.includes("open")).length, 0);
-		assert.equal(pipeline.invocations.filter(({ args }) => args.includes("close")).length, script ? 1 : 0);
+		assert.equal(pipeline.invocations.filter(({ args }) => args.includes("close")).length, 0);
 	});
 }
 
@@ -388,8 +528,13 @@ test("Pi pipeline keeps unconfigured browser scheduling and ordinary execution u
 
 test("Pi pipeline patches persisted QA reclassification failures to isError with model-visible prose", async () => {
 	const pipeline = await runPipelinePrompt({
-		toolArguments: { qa: { expectedSelector: "main", expectedText: ["Welcome"], url: "https://fail.example.test/" } },
+		toolName: "agent_browser_qa",
+		toolArguments: { expectedSelector: "main", expectedText: ["Welcome"], url: "https://fail.example.test/" },
 		fakeScript: `const fs = require("node:fs");
+if (process.argv.slice(-2).join(" ") === "get url") {
+  process.stdout.write(JSON.stringify({ success: true, data: { url: "https://fail.example.test/" } }));
+  process.exit(0);
+}
 const stdin = fs.readFileSync(0, "utf8");
 const steps = JSON.parse(stdin || "[]");
 const results = steps.map((step) => {
@@ -441,7 +586,15 @@ if (args.includes("click") || args.includes("find")) {
 			assert.deepEqual(details.nextActions?.map((action) => action.id), ["inspect-overlay-state"]);
 			assert.deepEqual(details.nextActions?.[0]?.params?.args, ["--namespace", "", "--session", "overlay-recovery", "snapshot", "-i"]);
 			const text = result.content.find((item) => item.type === "text")?.text ?? "";
-			if (json) assert.deepEqual(JSON.parse(text), { success: false, error });
+			if (json) {
+				const visible = JSON.parse(text);
+				assert.equal(visible.success, false);
+				assert.equal(visible.resultCategory, "failure");
+				assert.equal(visible.failureCategory, "upstream-error");
+				assert.equal(visible.error, error);
+				assert.deepEqual(visible.data, { error });
+				assert.deepEqual(visible.nextActions, details.nextActions);
+			}
 			else assert.match(text, /inspect-overlay-state/);
 			assert.match(details.nextActions?.[0]?.safety ?? "", /do not blindly retry/i);
 		}
@@ -474,6 +627,6 @@ test("Pi pipeline preserves persisted parseable JSON content while patching isEr
 		assert.equal((result.details as { resultCategory?: string } | undefined)?.resultCategory, "failure");
 		const text = result.content.find((item) => item.type === "text")?.text ?? "";
 		assert.doesNotMatch(text, /Pi tool isError/);
-		assert.deepEqual(JSON.parse(text), { error: "json boom", success: false });
+		assert.deepEqual(JSON.parse(text), { error: "json boom", data: { code: "boom" }, success: false, resultCategory: "failure", failureCategory: "upstream-error", summary: "json boom", sessionName: (result.details as { sessionName: string }).sessionName });
 	}
 });

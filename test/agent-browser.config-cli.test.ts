@@ -3,11 +3,12 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+import { spawn } from "cross-spawn";
 
 const CONFIG_SCRIPT = join(process.cwd(), "scripts", "config.mjs");
 const DOCUMENTED_CONFIG_HELPER_PREFIX = "npm exec --yes --package pi-agent-browser-native@latest -- pi-agent-browser-config";
@@ -136,11 +137,40 @@ function documentedNpmExecArgs(command: string): { args: string[]; input?: strin
 test("config CLI prints Pi-scoped paths and pass-through setup help", async () => {
 	const fixture = await createFixture();
 	const { stdout } = await runConfig(["paths"], { cwd: fixture.cwd, env: fixture.env });
-	assert.match(stdout, /\.pi\/config\/pi-agent-browser-native\/config\.json/);
+	assert.ok(stdout.includes(fixture.globalPath), stdout);
+	assert.ok(stdout.includes(fixture.projectPath), stdout);
 	const { stdout: help } = await runConfig(["--help"], { cwd: fixture.cwd, env: fixture.env });
 	assert.match(help, /Loaded config may use plaintext, environment interpolation, or !command credential sources/);
 	assert.match(help, /displayed status redacts resolved keys/);
 	assert.doesNotMatch(help, /^  pi-agent-browser-config/m);
+});
+
+test("config CLI executes from paths requiring file URL encoding", async () => {
+	const fixture = await createFixture();
+	const packageRoot = join(fixture.root, "package space # ü");
+	const script = join(packageRoot, "scripts", "config.mjs");
+	const policy = join(packageRoot, "extensions", "agent-browser", "lib", "config-policy.js");
+	await mkdir(dirname(script), { recursive: true });
+	await mkdir(dirname(policy), { recursive: true });
+	await copyFile(CONFIG_SCRIPT, script);
+	await copyFile(join(process.cwd(), "extensions", "agent-browser", "lib", "config-policy.js"), policy);
+	await writeFile(join(packageRoot, "package.json"), JSON.stringify({ type: "module" }));
+	const { stdout } = await runProcess(process.execPath, [script, "paths"], { cwd: fixture.cwd, env: fixture.env });
+	assert.ok(stdout.includes(fixture.globalPath), stdout);
+	assert.ok(stdout.includes(fixture.projectPath), stdout);
+	await assert.rejects(runProcess(process.execPath, [script, "not-a-command"], { cwd: fixture.cwd, env: fixture.env }), { code: 2 });
+});
+
+test("config module imports without invoking the CLI or inspecting the caller operand", async () => {
+	const fixture = await createFixture();
+	const moduleUrl = JSON.stringify(pathToFileURL(CONFIG_SCRIPT).href);
+	const { stdout, stderr } = await runProcess(process.execPath, [
+		"--input-type=module", "-e",
+		`const { main } = await import(${moduleUrl}); if (typeof main !== "function") throw new Error("missing main export");`,
+		join(fixture.root, "nonexistent-caller"),
+	], { cwd: fixture.cwd, env: fixture.env });
+	assert.equal(stdout, "");
+	assert.equal(stderr, "");
 });
 
 test("published package config docs only use npm-exec helper examples", async () => {

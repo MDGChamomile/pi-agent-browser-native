@@ -12,6 +12,7 @@ import {
 } from "../../managed-session-restore.js";
 import { getPageTargetValidationError } from "../../page-target-validation.js";
 import { isRecord } from "../../parsing.js";
+import { getBrowserResultMessage } from "../../browser-transcript.js";
 import { withAttachedBrowserSessionContext } from "../../process.js";
 import { buildAgentBrowserNextActions } from "../../results/action-recommendations.js";
 import { buildAgentBrowserResultCategoryDetails } from "../../results/categories.js";
@@ -151,9 +152,8 @@ function isElectronLaunchRecord(value: unknown): value is ElectronLaunchRecord {
 export function restoreElectronLaunchRecordsFromBranch(branch: unknown[]): Map<string, ElectronLaunchRecord> {
 	const records = new Map<string, ElectronLaunchRecord>();
 	for (const entry of branch) {
-		if (!isRecord(entry) || entry.type !== "message") continue;
-		const message = isRecord(entry.message) ? entry.message : undefined;
-		if (!message || message.toolName !== "agent_browser") continue;
+		const message = getBrowserResultMessage(entry);
+		if (!message) continue;
 		const details = isRecord(message.details) ? message.details : undefined;
 		const electron = isRecord(details?.electron) ? details.electron : undefined;
 		if (!electron) continue;
@@ -746,7 +746,7 @@ export async function cleanupTrackedElectronHostLaunches(options: ElectronHostLa
 		const sessionKey = getSessionPageStateKey(record.sessionName, record.namespace) ?? record.sessionName;
 		const managedSessionOwner = sessionKey ? options.ownedManagedSessions.get(sessionKey) : undefined;
 		const managedSessionCloseError = record.sessionName
-			? await closeManagedSession({ cwd: options.cwd, headedManagedAutosaveInterval: managedSessionOwner?.headedManagedAutosaveInterval, namespace: record.namespace, preserveAttachedBrowserSession: options.attachedSessionKeys.has(sessionKey ?? record.sessionName), restoreState: options.managedSessionRestoreState, sessionName: record.sessionName, timeoutMs: options.timeoutMs })
+			? await closeManagedSession({ cwd: options.cwd, headedManagedAutosaveInterval: managedSessionOwner?.headedManagedAutosaveInterval, namespace: record.namespace, preserveAttachedBrowserSession: options.attachedSessionKeys.has(sessionKey ?? record.sessionName), restoreState: options.managedSessionRestoreState, sessionName: record.sessionName, socketDir: managedSessionOwner?.socketDir, timeoutMs: options.timeoutMs })
 			: undefined;
 		const managedSessionStep = record.sessionName
 			? managedSessionCloseError

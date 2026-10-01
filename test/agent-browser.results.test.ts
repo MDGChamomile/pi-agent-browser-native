@@ -43,8 +43,10 @@ test("retirePendingRecordingManifestEntries retires only the closed session reco
 	const retired = retirePendingRecordingManifestEntries(manifest, "a", undefined, 4);
 	assert.deepEqual(retired.entries.map((entry) => entry.path), ["a.webm", "b.webm", "a.png"]);
 	assert.equal(retired.entries[0]?.subcommand, "close-abandoned");
-	assert.equal(retired.entries[0]?.retentionState, "missing");
-	assert.equal(retired.liveCount, 2);
+	assert.equal(retired.entries[0]?.retentionState, "live");
+	assert.equal(retired.entries[0]?.status, "unverified");
+	assert.equal(retired.entries[0]?.exists, undefined, "retiring a reservation does not prove a file is missing");
+	assert.equal(retired.liveCount, 3);
 	assert.equal(retired.updatedAtMs, 4);
 });
 
@@ -97,20 +99,20 @@ test("rich input recovery nextAction id helpers lock exact ids", () => {
 test("applyNamespaceToNextActions preserves namespaced follow-up context", () => {
 	const namespaced = applyNamespaceToNextActions([
 		{ id: "snapshot", params: { args: ["--session", "work", "snapshot", "-i"] }, reason: "r", tool: "agent_browser" },
-		{ id: "network-source", params: { networkSourceLookup: { requestId: "req-1", session: "work" } }, reason: "r", tool: "agent_browser" },
-		{ id: "status", params: { electron: { action: "status", launchId: "l1" } }, reason: "r", tool: "agent_browser" },
+		{ id: "network-source", params: { requestId: "req-1", session: "work" }, reason: "r", tool: "agent_browser_network_source" },
+		{ id: "status", params: { action: "status", launchId: "l1" }, reason: "r", tool: "agent_browser_electron" },
 	], "review");
 	assert.deepEqual(namespaced?.[0]?.params?.args, ["--namespace", "review", "--session", "work", "snapshot", "-i"]);
-	assert.deepEqual(namespaced?.[1]?.params?.networkSourceLookup, { namespace: "review", requestId: "req-1", session: "work" });
-	assert.deepEqual(namespaced?.[2]?.params, { electron: { action: "status", launchId: "l1" } });
+	assert.deepEqual(namespaced?.[1]?.params, { namespace: "review", requestId: "req-1", session: "work" });
+	assert.deepEqual(namespaced?.[2]?.params, { action: "status", launchId: "l1" });
 	assert.deepEqual(applyNamespaceToNextActions(namespaced, "review")?.[0]?.params?.args, namespaced?.[0]?.params?.args);
 
 	const defaultNamespaced = applyNamespaceToNextActions([
 		{ id: "snapshot", params: { args: ["--session", "work", "snapshot", "-i"] }, reason: "r", tool: "agent_browser" },
-		{ id: "network-source", params: { networkSourceLookup: { requestId: "req-1", session: "work" } }, reason: "r", tool: "agent_browser" },
+		{ id: "network-source", params: { requestId: "req-1", session: "work" }, reason: "r", tool: "agent_browser_network_source" },
 	], "");
 	assert.deepEqual(defaultNamespaced?.[0]?.params?.args, ["--namespace", "", "--session", "work", "snapshot", "-i"]);
-	assert.deepEqual(defaultNamespaced?.[1]?.params?.networkSourceLookup, { namespace: "", requestId: "req-1", session: "work" });
+	assert.deepEqual(defaultNamespaced?.[1]?.params, { namespace: "", requestId: "req-1", session: "work" });
 	assert.deepEqual(applyNamespaceToNextActions(defaultNamespaced, "")?.[0]?.params?.args, defaultNamespaced?.[0]?.params?.args);
 });
 
@@ -118,13 +120,13 @@ test("applySessionToNextActions preserves session-scoped follow-up context", () 
 	const sessionScoped = applySessionToNextActions([
 		{ id: "snapshot", params: { args: ["snapshot", "-i"] }, reason: "r", tool: "agent_browser" },
 		{ id: "namespaced", params: { args: ["--namespace", "review", "snapshot", "-i"] }, reason: "r", tool: "agent_browser" },
-		{ id: "network-source", params: { networkSourceLookup: { requestId: "req-1" } }, reason: "r", tool: "agent_browser" },
-		{ id: "status", params: { electron: { action: "status", launchId: "l1" } }, reason: "r", tool: "agent_browser" },
+		{ id: "network-source", params: { requestId: "req-1" }, reason: "r", tool: "agent_browser_network_source" },
+		{ id: "status", params: { action: "status", launchId: "l1" }, reason: "r", tool: "agent_browser_electron" },
 	], "work");
 	assert.deepEqual(sessionScoped?.[0]?.params?.args, ["--session", "work", "snapshot", "-i"]);
 	assert.deepEqual(sessionScoped?.[1]?.params?.args, ["--namespace", "review", "--session", "work", "snapshot", "-i"]);
-	assert.deepEqual(sessionScoped?.[2]?.params?.networkSourceLookup, { requestId: "req-1" });
-	assert.deepEqual(sessionScoped?.[3]?.params, { electron: { action: "status", launchId: "l1" } });
+	assert.deepEqual(sessionScoped?.[2]?.params, { requestId: "req-1" });
+	assert.deepEqual(sessionScoped?.[3]?.params, { action: "status", launchId: "l1" });
 	const repeated = applySessionToNextActions(sessionScoped, "work");
 	assert.deepEqual(repeated?.[0]?.params?.args, sessionScoped?.[0]?.params?.args);
 	assert.deepEqual(repeated?.[1]?.params?.args, sessionScoped?.[1]?.params?.args);
@@ -270,6 +272,13 @@ test("classifyAgentBrowserFailureCategory locks common machine-readable failure 
 	assert.equal(classifyAgentBrowserFailureCategory({ errorText: "Navigation failed: net::ERR_BLOCKED_BY_CLIENT" }), "upstream-error");
 });
 
+test("unverified recording evidence cannot become artifact-saved merely because the file exists", () => {
+	const unverified = { absolutePath: "/tmp/take.webm", path: "take.webm", command: "record", subcommand: "stop", kind: "video" as const, status: "unverified" as const, exists: true };
+	assert.equal(classifyAgentBrowserSuccessCategory({ artifacts: [unverified] }), "artifact-unverified");
+	const pending = { ...unverified, absolutePath: "/tmp/next.webm", path: "next.webm", exists: undefined, status: "pending" as const, subcommand: "restart" };
+	assert.equal(classifyAgentBrowserSuccessCategory({ artifacts: [unverified, pending] }), "artifact-unverified");
+});
+
 test("classifyAgentBrowserSuccessCategory locks common machine-readable success categories", () => {
 	assert.equal(classifyAgentBrowserSuccessCategory({}), "completed");
 	assert.equal(classifyAgentBrowserSuccessCategory({ inspection: true }), "inspection");
@@ -299,6 +308,9 @@ test("buildAgentBrowserNextActions returns exact native-tool recommendations for
 	}
 	assert.deepEqual(buildAgentBrowserNextActions({ command: "click", resultCategory: "failure", failureCategory: "stale-ref" })?.[0]?.params?.args, ["snapshot", "-i"]);
 	assert.equal(buildAgentBrowserNextActions({ command: "wait", resultCategory: "failure", failureCategory: "timeout" })?.[0]?.id, "inspect-after-timeout");
+	assert.deepEqual(buildAgentBrowserNextActions({ command: "session", subcommand: "info", resultCategory: "failure", failureCategory: "timeout", sessionName: "named" })?.map(action => ({ id: action.id, args: action.params?.args })), [
+		{ id: "retry-session-info", args: ["--session", "named", "session", "info"] },
+	]);
 	assert.deepEqual(buildAgentBrowserNextActions({ args: ["wait", "--url", "**/cart.html"], command: "wait", resultCategory: "failure", failureCategory: "timeout" })?.map((action) => action.id), ["inspect-after-timeout", "fresh-session-after-url-wait-timeout"]);
 	assert.deepEqual(buildAgentBrowserNextActions({ args: ["wait", "--url", "**/cart.html"], command: "wait", resultCategory: "failure", failureCategory: "timeout" })?.[1]?.params, { args: ["open", "about:blank"], sessionMode: "fresh" });
 	// Fresh-session recovery must stay unprefixed: the planner ignores sessionMode when --session is explicit.
@@ -411,9 +423,9 @@ test("buildAgentBrowserNextActions returns exact native-tool recommendations for
 			successCategory: "completed",
 		})?.map((action) => ({ id: action.id, params: action.params })),
 		[
-			{ id: "status-electron-launch", params: { electron: { action: "status", launchId: "el_123" } } },
-			{ id: "probe-electron-launch", params: { electron: { action: "probe", launchId: "el_123" } } },
-			{ id: "cleanup-electron-launch", params: { electron: { action: "cleanup", launchId: "el_123" } } },
+			{ id: "status-electron-launch", params: { action: "status", launchId: "el_123" } },
+			{ id: "probe-electron-launch", params: { action: "probe", launchId: "el_123" } },
+			{ id: "cleanup-electron-launch", params: { action: "cleanup", launchId: "el_123" } },
 			{ id: "list-electron-tabs", params: { args: ["--session", "pi-agent-browser-electron-el_123", "tab", "list"] } },
 			{ id: "snapshot-electron-session", params: { args: ["--session", "pi-agent-browser-electron-el_123", "snapshot", "-i"] } },
 		],
@@ -425,8 +437,8 @@ test("buildAgentBrowserNextActions returns exact native-tool recommendations for
 			resultCategory: "failure",
 		})?.map((action) => ({ id: action.id, params: action.params })),
 		[
-			{ id: "status-electron-launch", params: { electron: { action: "status", launchId: "el_456" } } },
-			{ id: "retry-electron-cleanup", params: { electron: { action: "cleanup", launchId: "el_456" } } },
+			{ id: "status-electron-launch", params: { action: "status", launchId: "el_456" } },
+			{ id: "retry-electron-cleanup", params: { action: "cleanup", launchId: "el_456" } },
 		],
 	);
 	assert.equal(buildAgentBrowserNextActions({ resultCategory: "success", successCategory: "completed" }), undefined);
@@ -868,7 +880,7 @@ test("buildQaCompactPassText summarizes successful URL QA", async () => {
 	});
 	assert.match(compact, /Page: Example — https:\/\/example\.test\//);
 	assert.match(compact, /Checks run: load:domcontentloaded, text×1, network, console, errors, diagnostics-reset \(9 batch steps\)/);
-	assert.match(compact, /Diagnostic isolation: URL QA clears enabled network\/console buffers, then snapshots any page-error residue/);
+	assert.match(compact, /Diagnostic isolation: URL QA requests clears of enabled diagnostic buffers before opening the target\./);
 	assert.match(compact, /Full diagnostic matrix: see details\.qaPreset and details\.batchSteps\./);
 });
 
@@ -891,4 +903,17 @@ test("buildQaCompactFailureText leads with the redacted cause and reports execut
 	assert.match(compact, /Not run:\n- expected text: "Welcome"/);
 	assert.match(compact, /Execution: 5\/13 batch steps/);
 	assert.doesNotMatch(compact, /raw-secret/);
+	const unknown = buildQaCompactFailureText({
+		plannedStepCount: 13,
+		qaPreset: { failedChecks: ["expected text was not verified before timeout"], notRunChecks: [], passed: false, summary: "QA preset failed.", warnings: [] },
+	});
+	assert.match(unknown, /Execution: unknown\/13 batch steps/);
+	assert.doesNotMatch(unknown, /Execution: 0\/|Not run:/);
+	const longCause = buildQaCompactFailureText({
+		causalError: "Navigation failed:\n" + "x".repeat(10000),
+		plannedStepCount: 13,
+		qaPreset: { failedChecks: ["open failed"], notRunChecks: [], passed: false, summary: "QA preset failed.", warnings: [] },
+	});
+	assert.ok(longCause.split("\n")[0]!.length <= 700);
+	assert.match(longCause, /^Navigation failed: x/);
 });

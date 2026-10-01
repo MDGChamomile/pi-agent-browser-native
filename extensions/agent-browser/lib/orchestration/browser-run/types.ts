@@ -14,6 +14,8 @@ import type { buildExecutionPlan, CompatibilityWorkaround, OpenResultTabCorrecti
 import type { ManagedSessionRestoreState, OwnedManagedSessionContext } from "../../managed-session-restore.js";
 import type { ManagedSessionPolicyLock } from "../../managed-session-policy-lock.js";
 import type { PromptPolicy } from "../../prompt-policy.js";
+import type { ActiveRecordingReservation } from "../../recording-reservations.js";
+import type { ReadConfirmation } from "../../read-confirmation.js";
 import type { AgentBrowserExecuteParams, ResolvedAgentBrowserValidInput } from "../input-plan.js";
 
 export type AgentBrowserToolResult = AgentToolResult<unknown> & { isError?: boolean };
@@ -59,9 +61,12 @@ export interface OwnedManagedSessionReference {
 	headedManagedAutosaveInterval?: string;
 	namespace?: string;
 	sessionName: string;
+	socketDir?: string;
 }
 
 export interface BrowserRunState {
+	observedBrowserEffects?: Record<string, unknown>;
+	activeRecordingReservations?: ReadonlyMap<string, ActiveRecordingReservation>;
 	attachedSessionKeys: Set<string>;
 	artifactManifest?: SessionArtifactManifest;
 	closedManagedSessionNames: Set<string>;
@@ -98,6 +103,9 @@ export interface BrowserRunStatePatch {
 }
 
 export interface BrowserRunOptions {
+	modelVisible?: boolean;
+	operationCwd?: string;
+	daemonInactive?: boolean;
 	ctx: BrowserRunContext;
 	cwd: string;
 	electronPostCommandStatusSettleMs: number;
@@ -226,15 +234,13 @@ export interface TimeoutArtifactEvidence {
 	stepIndex: number;
 }
 
-export type TimeoutProgressStepStatus = "completed" | "failed" | "pending" | "unknown";
-
 export interface TimeoutProgressStep {
 	args: string[];
 	generatedFrom?: string;
 	index: number;
 	reason?: string;
 	retry?: { args: string[]; stdin: string };
-	status: TimeoutProgressStepStatus;
+	status: "unknown";
 }
 
 export interface TimeoutPartialProgress {
@@ -245,7 +251,6 @@ export interface TimeoutPartialProgress {
 		url?: string;
 	};
 	liveUrlRecovered?: boolean;
-	openedButPostOpenTimedOut?: boolean;
 	retryStep?: TimeoutProgressStep;
 	steps?: TimeoutProgressStep[];
 	summary: string;
@@ -426,6 +431,8 @@ export interface ElectronRefFreshnessDiagnostic {
 }
 
 export interface PreparedBrowserRun {
+	chromeStartupArgs?: string;
+	readConfirmation?: ReadConfirmation;
 	batchScreenshotArtifactRequests?: Array<ScreenshotArtifactRequest | undefined>;
 	headedLaunch: boolean;
 	providerLaunch: boolean;
@@ -508,6 +515,7 @@ export interface FinalRecoveryState {
 }
 
 export interface FinalResultInput {
+	modelVisible?: boolean;
 	aboutBlankSessionMismatch?: AboutBlankSessionMismatch;
 	artifactCleanup?: ArtifactCleanupGuidance;
 	categoryDetails: AgentBrowserResultCategoryDetails;

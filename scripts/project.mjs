@@ -172,6 +172,7 @@ export function hostToolPath(pathValue = process.env.PATH ?? "") {
 }
 
 function localToolStep(command, args, env) {
+	if (command === "tsc" && process.platform === "android") return { command: "tsgo", args, env };
 	return { command: join(process.cwd(), "node_modules", ".bin", `${command}${binSuffix}`), args, env };
 }
 

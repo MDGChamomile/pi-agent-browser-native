@@ -1,4 +1,7 @@
 import type { AgentBrowserNextAction } from "./next-actions.js";
+import type { RecordingReceipt } from "./recording.js";
+import type { ReadConfirmation } from "../read-confirmation.js";
+import type { RecordingRecovery } from "../orchestration/browser-run/recording-recovery.js";
 
 export type { AgentBrowserNextAction } from "./next-actions.js";
 
@@ -45,6 +48,22 @@ export interface AgentBrowserResultCategoryDetails {
 	successCategory?: AgentBrowserSuccessCategory;
 }
 
+export interface AgentBrowserObservation extends AgentBrowserResultCategoryDetails {
+	[key: string]: unknown;
+	success: boolean;
+	data?: unknown;
+	error?: unknown;
+	summary?: string;
+	sessionName?: string;
+	namespace?: string;
+	failures?: AgentBrowserObservation[];
+	nextActions?: AgentBrowserNextAction[];
+	artifacts?: FileArtifactMetadata[];
+	artifactVerification?: ArtifactVerificationSummary;
+	imageObservations?: ImageObservation[];
+	batchSteps?: Array<AgentBrowserObservation & { index: number; command?: string[] }>;
+}
+
 export interface AgentBrowserPageChangeSummary {
 	artifactCount?: number;
 	changeType: "artifact" | "confirmation" | "mutation" | "navigation";
@@ -59,7 +78,7 @@ export interface AgentBrowserPageChangeSummary {
 
 export type FileArtifactKind = "download" | "file" | "har" | "image" | "pdf" | "profile" | "trace" | "video";
 
-export type FileArtifactStatus = "missing" | "pending" | "repaired-from-temp" | "saved" | "stale" | "upstream-temp-only";
+export type FileArtifactStatus = "failed" | "missing" | "pending" | "repaired-from-temp" | "saved" | "stale" | "unverified" | "upstream-temp-only";
 
 export interface FileArtifactMetadata {
 	absolutePath: string;
@@ -72,6 +91,8 @@ export interface FileArtifactMetadata {
 	mediaType?: string;
 	namespace?: string;
 	path: string;
+	recording?: RecordingReceipt;
+	recordingStartedAtMs?: number;
 	recordingState?: "openRecording";
 	requestedPath?: string;
 	session?: string;
@@ -93,6 +114,8 @@ export interface ArtifactVerificationEntry {
 	mediaType?: string;
 	path: string;
 	requestedPath?: string;
+	recording?: RecordingReceipt;
+	recordingStartedAtMs?: number;
 	recordingState?: "openRecording";
 	retentionState?: ArtifactRetentionState;
 	sizeBytes?: number;
@@ -126,6 +149,10 @@ export type ArtifactStorageScope = "explicit-path" | "persistent-session" | "pro
 
 export interface SessionArtifactManifestEntry {
 	absolutePath?: string;
+	recording?: RecordingReceipt;
+	recordingStartedAtMs?: number;
+	recordingState?: "openRecording";
+	status?: FileArtifactStatus;
 	command?: string;
 	createdAtMs: number;
 	cwd?: string;
@@ -164,6 +191,35 @@ export interface AgentBrowserWindow {
 	visibility: "unverified";
 }
 
+export interface ScreenshotSample {
+	url: string;
+	frame: "main" | "child";
+	childFrameCount: number;
+	viewport: { width: number; height: number };
+	document: { width: number; height: number };
+	scroll: { x: number; y: number };
+	dpr: number;
+	visualViewport: { x: number; y: number; scale: number };
+	element?: { x: number; y: number; width: number; height: number };
+}
+
+export interface ImageObservation {
+	id?: string;
+	path: string;
+	mimeType: string;
+	pixels?: { width: number; height: number };
+	capture: "viewport" | "full-page" | "element" | "unknown";
+	geometry: {
+		status: "measured" | "unknown";
+		reason: string;
+		before?: ScreenshotSample;
+		after?: ScreenshotSample;
+		/** CSS document coordinates of the captured rectangle, not mouse coordinates. */
+		crop?: { x: number; y: number; width: number; height: number };
+		pixelsPerCssPixel?: { x: number; y: number };
+	};
+}
+
 export interface BatchStepPresentationDetails {
 	artifactVerification?: ArtifactVerificationSummary;
 	artifacts?: FileArtifactMetadata[];
@@ -175,6 +231,7 @@ export interface BatchStepPresentationDetails {
 	fullOutputPaths?: string[];
 	imagePath?: string;
 	imagePaths?: string[];
+	imageObservations?: ImageObservation[];
 	index: number;
 	lifecycle?: AgentBrowserLifecycle;
 	networkRouteDiagnostics?: NetworkRouteDiagnostic[];
@@ -197,6 +254,8 @@ export interface BatchFailurePresentationDetails {
 }
 
 export interface ToolPresentation {
+	readConfirmation?: ReadConfirmation;
+	recordingRecovery?: RecordingRecovery;
 	artifactManifest?: SessionArtifactManifest;
 	artifactRetentionSummary?: string;
 	artifactVerification?: ArtifactVerificationSummary;
@@ -210,6 +269,7 @@ export interface ToolPresentation {
 	fullOutputPaths?: string[];
 	imagePath?: string;
 	imagePaths?: string[];
+	imageObservations?: ImageObservation[];
 	networkRouteDiagnostics?: NetworkRouteDiagnostic[];
 	nextActions?: AgentBrowserNextAction[];
 	pageChangeSummary?: AgentBrowserPageChangeSummary;

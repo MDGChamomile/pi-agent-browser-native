@@ -40,7 +40,7 @@ if (tokens[0] === 'batch') {
 } else if (tokens[0] === 'eval' && tokens[1] === '--no-sandbox') {
   process.stdout.write(JSON.stringify({ success: false, error: 'Native fixture evaluation error' }));
   process.exitCode = 1;
-} else process.stdout.write(JSON.stringify({ success: true, data: data(tokens) }));`);
+} else process.stdout.write(JSON.stringify({ success: true, data: data(tokens) }));`, "linux"); // Intentional shell-free shebang fixture; stock CMD transport has separate native coverage.
 	try {
 		await withPatchedEnv({ PATH: `${root}${delimiter}${process.env.PATH ?? ""}`, PI_AGENT_BROWSER_TEST_CUSTOM_VERSION: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: root });
@@ -115,7 +115,8 @@ for (const args of [
 			assert.equal(result.isError, evaluation, result.content[0]?.text);
 			if (evaluation) assert.match(result.content[0]?.text ?? "", /Native fixture evaluation error/);
 			const calls = await readInvocationLog(log);
-			assert.ok(calls.some(call => JSON.stringify(call.args.slice(-args.length)) === JSON.stringify(args)), JSON.stringify(calls));
+			const expected = args.map((token, index) => args[index - 1] === "--args" ? `--no-startup-window,${token}` : token);
+			assert.ok(calls.some(call => JSON.stringify(call.args.slice(-expected.length)) === JSON.stringify(expected)), JSON.stringify(calls));
 		});
 	});
 }
@@ -130,7 +131,7 @@ for (const mode of ["stdin", "raw"] as const) {
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, { args, stdin, sessionMode: "fresh" });
 			assert.equal(result.isError, false, JSON.stringify(result));
 			const batch = (await readInvocationLog(log)).find(call => call.args.includes("batch"));
-			assert.deepEqual(batch?.args.slice(-args.length), args);
+			assert.deepEqual(batch?.args.slice(-args.length), ["--args", "--no-startup-window,--no-sandbox", ...args.slice(2)]);
 			assert.equal((batch as { stdin?: string } | undefined)?.stdin, stdin);
 			assert.deepEqual((result.details?.batchSteps as Array<{ data?: { echo?: string[] } }>).map(step => step.data?.echo), rows);
 		});

@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { dirname, join, win32 } from "node:path";
 
 const WINDOWS_PROCESS_START_IDENTITY_PREFIX = "win32-powershell-ticks-v1:";
-const PROCESS_START_IDENTITY_TIMEOUT_MS = 5_000;
+// Native Windows PowerShell startup can exhaust the former five-second probe budget.
+const PROCESS_START_IDENTITY_TIMEOUT_MS = process.platform === "win32" ? 10_000 : 5_000;
 const DEFAULT_WINDOWS_SYSTEM_ROOT = "C:\\Windows";
 
 export interface ProcessStartIdentityCommand {
@@ -58,10 +59,15 @@ export function normalizeProcessStartIdentity(stdout: string): string | undefine
 }
 
 let currentProcessStartIdentityPromise: Promise<string | undefined> | undefined;
+let currentProcessStartIdentity: string | undefined;
 
-async function executeProcessStartIdentityCommand(command: ProcessStartIdentityCommand): Promise<string | undefined> {
+interface ProcessIdentityBudget { signal?: AbortSignal; deadline?: number }
+
+async function executeProcessStartIdentityCommand(command: ProcessStartIdentityCommand, budget: ProcessIdentityBudget = {}): Promise<string | undefined> {
+	if (budget.signal?.aborted || (budget.deadline !== undefined && Date.now() >= budget.deadline)) return undefined;
+	const timeout = Math.max(1, Math.min(PROCESS_START_IDENTITY_TIMEOUT_MS, (budget.deadline ?? Infinity) - Date.now()));
 	return await new Promise((resolve) => {
-		execFile(command.file, command.args, { timeout: PROCESS_START_IDENTITY_TIMEOUT_MS }, (error, stdout) => {
+		execFile(command.file, command.args, { timeout, signal: budget.signal }, (error, stdout) => {
 			resolve(error ? undefined : normalizeProcessStartIdentity(stdout));
 		});
 	});
@@ -78,17 +84,26 @@ export async function resolveProcessStartIdentityFromCommands(
 	return undefined;
 }
 
-async function readUncachedProcessStartIdentity(pid: number, platform: NodeJS.Platform): Promise<string | undefined> {
-	return await resolveProcessStartIdentityFromCommands(buildProcessStartIdentityCommands(pid, platform));
+async function readUncachedProcessStartIdentity(pid: number, platform: NodeJS.Platform, budget?: ProcessIdentityBudget): Promise<string | undefined> {
+	return await resolveProcessStartIdentityFromCommands(buildProcessStartIdentityCommands(pid, platform), command => executeProcessStartIdentityCommand(command, budget));
 }
 
 export async function readProcessStartIdentity(
 	pid: number,
 	platform: NodeJS.Platform = process.platform,
+	budget?: ProcessIdentityBudget,
 ): Promise<string | undefined> {
-	if (pid !== process.pid || platform !== process.platform) return await readUncachedProcessStartIdentity(pid, platform);
+	if (budget?.signal?.aborted || (budget?.deadline !== undefined && Date.now() >= budget.deadline)) return undefined;
+	if (pid !== process.pid || platform !== process.platform) return await readUncachedProcessStartIdentity(pid, platform, budget);
+	if (currentProcessStartIdentity) return currentProcessStartIdentity;
+	if (budget) {
+		const identity = await readUncachedProcessStartIdentity(pid, platform, budget);
+		if (identity) currentProcessStartIdentity = identity;
+		return identity;
+	}
 	currentProcessStartIdentityPromise ??= readUncachedProcessStartIdentity(pid, platform).then((identity) => {
 		if (!identity) currentProcessStartIdentityPromise = undefined;
+		else currentProcessStartIdentity = identity;
 		return identity;
 	});
 	return await currentProcessStartIdentityPromise;

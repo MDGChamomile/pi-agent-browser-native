@@ -14,7 +14,6 @@ import test from "node:test";
 
 import {
 	createExtensionHarness,
-	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
@@ -64,12 +63,15 @@ process.stdout.write(JSON.stringify({ success: true, data: JSON.parse(fs.readFil
 					await writeFile(dataPath, JSON.stringify(data));
 					const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "fixture", "session", "info"] });
 					assert.equal(result.isError, false);
-					assert.deepEqual(JSON.parse(result.content[0]?.text ?? ""), data);
-					assert.deepEqual(result.details?.data, data);
+					const text = result.content[0]?.text ?? "";
+					assert.ok(text.startsWith(`Daemon: ${status.active ? "active" : "inactive"}; PID: ${status.pid ?? "unknown"}\n`));
+					assert.match(text, /\nBrowser: unknown; alive: unknown; Chrome PID: unknown\nExact profile: unknown\nNative browser ownership: unknown; Pi cleanup ownership: caller-owned\n\n/);
+					assert.deepEqual(JSON.parse(text.slice(text.indexOf("\n\n") + 2).split("\n\nObservation:")[0]), data);
+					assert.deepEqual(result.details?.data, { ...data, piCleanupOwnership: "caller-owned" });
 				}
 				await writeFile(dataPath, JSON.stringify({ session: "fixture" }));
 				const legacy = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "fixture", "session", "info"] });
-				assert.equal(legacy.content[0]?.text, "Current session: fixture");
+				assert.match(legacy.content[0]?.text ?? "", /^Current session: fixture\n\nObservation:/);
 				assert.equal((await readInvocationLog(logPath)).length, 4);
 			} finally {
 				await runExtensionEvent(harness.handlers, "session_shutdown", {}, harness.ctx);
@@ -218,6 +220,12 @@ process.stdout.write(JSON.stringify({ success: true, data: { title: "Example Dom
 				sessionMode: "fresh",
 			});
 			assert.equal(aligned.isError, false);
+			const alignedInvocations = await readInvocationLog(logPath);
+			assert.deepEqual(alignedInvocations.map(entry => entry.args.slice(-2)), [
+				["open", "https://example.com/"],
+				["tab", "list"],
+			]);
+			assert.deepEqual(alignedInvocations.map(entry => entry.idleTimeout), ["1234", "1234"]);
 
 			const activeSessionMismatch = await executeRegisteredTool(harness.tool, harness.ctx, {
 				args: ["--idle-timeout", "5000", "open", "https://example.com/next"],
@@ -225,7 +233,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { title: "Example Dom
 			assert.equal(activeSessionMismatch.isError, true);
 			assert.match(String(activeSessionMismatch.details?.validationError), /PI_AGENT_BROWSER_IMPLICIT_SESSION_IDLE_TIMEOUT_MS=5000/);
 			assert.equal(activeSessionMismatch.details?.sessionRecoveryHint, undefined);
-			assert.deepEqual((await readInvocationLog(logPath)).map((entry) => entry.idleTimeout), ["1234"]);
+			assert.deepEqual(await readInvocationLog(logPath), alignedInvocations);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -507,6 +515,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const connect = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "connect", "9222"] });
 			const url = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "get", "url"] });
 			const snapshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "snapshot", "-i"] });
+			const attachedBranch = harness.ctx.sessionManager.getBranch().slice();
 			const attachedCloseThenOpen = await executeRegisteredTool(harness.tool, harness.ctx, {
 				args: ["--session", "cloudflare-live", "batch"],
 				stdin: JSON.stringify([["close"], ["open", "https://dash.cloudflare.com/"]]),
@@ -538,6 +547,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			});
 			assert.equal(attachedTerminalClose.isError, false, attachedTerminalClose.content[0]?.type === "text" ? attachedTerminalClose.content[0].text : "terminal close batch failed");
 			assert.equal(attachedTerminalClose.details?.refSnapshot, undefined);
+			const terminalBranch = harness.ctx.sessionManager.getBranch().slice();
 			const requestsAfterTerminalClose = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "cloudflare-live", "network", "requests"] });
 			assert.equal(requestsAfterTerminalClose.isError, false, requestsAfterTerminalClose.content[0]?.type === "text" ? requestsAfterTerminalClose.content[0].text : "post-close requests failed");
 			assert.equal(requestsAfterTerminalClose.details?.attachedBrowserSession, undefined);
@@ -549,7 +559,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const terminalResumeInvocationCount = (await readInvocationLog(logPath)).length;
 			const terminalResumeHarness = createExtensionHarness({
-				branch: [connect, url, snapshot, attachedTerminalClose].map((result) => createToolBranchEntry({ details: result.details ?? {}, isError: result.isError })),
+				branch: terminalBranch,
 				cwd: tempDir,
 				prompt: "Resume after the attached session was closed by a batch.",
 			});
@@ -564,11 +574,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const invocationCount = (await readInvocationLog(logPath)).length;
 			const resumedHarness = createExtensionHarness({
-				branch: [
-					createToolBranchEntry({ details: connect.details ?? {}, isError: connect.isError }),
-					createToolBranchEntry({ details: url.details ?? {}, isError: url.isError }),
-					createToolBranchEntry({ details: snapshot.details ?? {}, isError: snapshot.isError }),
-				],
+				branch: attachedBranch,
 				cwd: tempDir,
 				prompt: "Resume the attached Cloudflare tab.",
 			});
@@ -600,6 +606,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			await runExtensionEvent(managedHarness.handlers, "session_start", { reason: "new" }, managedHarness.ctx);
 			const managedUrl = await executeRegisteredTool(managedHarness.tool, managedHarness.ctx, { args: ["--cdp", "9222", "get", "url"], sessionMode: "fresh" });
 			assert.equal(managedUrl.isError, false);
+			const managedBranch = managedHarness.ctx.sessionManager.getBranch().slice();
 			const managedSessionName = managedUrl.details?.sessionName;
 			assert.equal(typeof managedSessionName, "string");
 			await writeFile(unsafeTargetPath, "unsafe", "utf8");
@@ -615,7 +622,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			const namespaceResumeInvocationCount = (await readInvocationLog(logPath)).length;
 			await withPatchedEnv({ AGENT_BROWSER_NAMESPACE: "changed-after-attach" }, async () => {
 				const namespaceResumeHarness = createExtensionHarness({
-					branch: [createToolBranchEntry({ details: managedUrl.details ?? {}, isError: managedUrl.isError })],
+					branch: managedBranch,
 					cwd: tempDir,
 					prompt: "Close the default-namespace attachment after the process environment namespace changes.",
 				});
@@ -637,7 +644,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				assert.equal(typeof failedSessionName, "string");
 				const failedInvocationCount = (await readInvocationLog(logPath)).length;
 				const failedResumeHarness = createExtensionHarness({
-					branch: [createToolBranchEntry({ details: failedAttach.details ?? {}, isError: failedAttach.isError })],
+					branch: failedHarness.ctx.sessionManager.getBranch().slice(),
 					cwd: tempDir,
 					prompt: "Resume and clean up the failed attachment that retained an active daemon.",
 				});
@@ -660,7 +667,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				assert.ok(envInvocations.every((entry) => !entry.args.includes("--args") && !entry.args.includes("--allow-file-access")));
 				await withPatchedEnv({ AGENT_BROWSER_CDP: undefined }, async () => {
 					const resumedEnvHarness = createExtensionHarness({
-						branch: [createToolBranchEntry({ details: envSnapshot.details ?? {}, isError: envSnapshot.isError })],
+						branch: envHarness.ctx.sessionManager.getBranch().slice(),
 						cwd: tempDir,
 						prompt: "Resume the environment-attached session without the original environment flag.",
 					});
@@ -784,6 +791,10 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			for (const args of commands) {
 				const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: [...args] });
 				assert.equal(result.isError, false, `${args.join(" ")}: ${result.content[0]?.type === "text" ? result.content[0].text : ""}`);
+				if (args[0] === "get" && args[1] === "url") {
+					assert.deepEqual(result.details?.args, ["get", "url"]);
+					assert.equal((result.details?.data as { url?: string })?.url, "https://example.test/current");
+				}
 			}
 
 			const invocations = await readInvocationLog(logPath);
@@ -791,19 +802,25 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				.map((entry) => stripWrapperPrefix(entry.args))
 				.filter((args) => !(args.length === 2 && args[0] === "eval" && args[1] === "--stdin"));
 			// The navigation-summary helper reuses an already-observed title for ordinary same-URL probes. Tab
-			// selection and close always verify the active target title because same-URL tabs can have different titles.
+			// creation, selection and close always verify the active target title because same-URL tabs can have different titles.
 			let navigationSummaryTitleObserved = false;
 			const expectedInvocations = commands.flatMap((args) => {
 				const normalizedArgs = stripWrapperPrefix([...args]);
 				const command = normalizedArgs[0];
-				const tabAction = command === "tab" && normalizedArgs[1] !== undefined && !["list", "new"].includes(normalizedArgs[1]);
+				const tabAction = command === "tab" && normalizedArgs[1] !== undefined && normalizedArgs[1] !== "list";
 				const probesSummary = command === "click" || tabAction || command === "back" || command === "forward" || command === "reload" || command === "dblclick" || command === "eval";
-				if (!probesSummary) return [normalizedArgs];
+				if (!probesSummary) return command === "get" && normalizedArgs[1] === "url"
+					? [normalizedArgs, ["tab", "list"]]
+					: [normalizedArgs];
 				const titleProbe = !navigationSummaryTitleObserved || tabAction;
 				navigationSummaryTitleObserved = true;
-				return titleProbe ? [normalizedArgs, ["get", "url"], ["get", "title"]] : [normalizedArgs, ["get", "url"]];
+				return titleProbe
+					? [normalizedArgs, ["get", "url"], ["get", "title"], ["tab", "list"]]
+					: [normalizedArgs, ["get", "url"], ["tab", "list"]];
 			});
-			assert.deepEqual(commandInvocations, expectedInvocations);
+			// Root-session page checks may add get url; retain exact argv/order for every other command.
+			const withoutUrlChecks = (rows: string[][]) => rows.filter((args) => args.join(" ") !== "get url");
+			assert.deepEqual(withoutUrlChecks(commandInvocations), withoutUrlChecks(expectedInvocations));
 			assert.ok(invocations.every((entry) => entry.args[0] === "--json" && entry.args.includes("--session")));
 		});
 	} finally {
@@ -886,6 +903,10 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				assert.doesNotMatch(result.content[0]?.text ?? "", /cookie-secret|cookie-get-secret|storage-secret/);
 				assert.doesNotMatch(JSON.stringify(result.details), /cookie-secret|cookie-get-secret|storage-secret/);
 				if (args[0] === "storage" && args[1] === "local" && args[2] === "set") storageSetResult = result;
+				if (args[0] === "get" && args[1] === "url") {
+					assert.deepEqual(result.details?.args, ["get", "url"]);
+					assert.equal((result.details?.data as { url?: string })?.url, "https://example.test/current");
+				}
 			}
 			assert.match(storageSetResult?.content[0]?.text ?? "", /theme: dark/);
 			assert.match(JSON.stringify(storageSetResult?.details), /"value":"dark"/);
@@ -901,7 +922,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				.map((entry) => stripWrapperPrefix(entry.args))
 				.filter((args) => !(args[0] === "tab" && args[1] === "list"))
 				.filter((args) => !(args.includes("cookies") && args.includes("set") && args.includes("json-cookie-secret")));
-			assert.deepEqual(userInvocations, commands.map((args) => [...args]));
+			assert.deepEqual(userInvocations.filter((args) => args.join(" ") !== "get url"), commands.map((args) => [...args]).filter((args) => args.join(" ") !== "get url"));
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {
 				const userArgs = stripWrapperPrefix(entry.args);
@@ -1042,9 +1063,9 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const invocations = await readInvocationLog(logPath);
 			const userInvocations = invocations.map((entry) => stripWrapperPrefix(entry.args));
-			assert.deepEqual(userInvocations, commands.flatMap((args) => args[0] === "diff" && args[1] === "url"
-				? [[...args], ["get", "url"], ["get", "title"]]
-				: [[...args]]));
+			assert.deepEqual(userInvocations.filter((args) => args.join(" ") !== "get url"), commands.flatMap((args) => args[0] === "diff" && args[1] === "url"
+				? [[...args], ["get", "title"], ["tab", "list"]]
+				: [[...args]]).filter((args) => args.join(" ") !== "get url"));
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {
 				const userArgs = stripWrapperPrefix(entry.args);
@@ -1072,7 +1093,7 @@ test("agentBrowserExtension treats stream enable already-enabled as idempotent n
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Enable stream." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["stream", "enable"] });
@@ -1097,7 +1118,7 @@ test("agentBrowserExtension does not mask non-exact stream enable failures", { c
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Enable stream." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["stream", "enable"] });
@@ -1125,7 +1146,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://example.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Mock network route." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const routeResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["network", "route", "**/api/**", "--body", "{}", "--resource-type", "fetch"] });
@@ -1166,7 +1187,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://example.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Mock network route in a batch." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const batchResult = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -1241,7 +1262,7 @@ if (args.includes("get") && args.includes("url")) {
 
 			const invocations = await readInvocationLog(logPath);
 			assert.deepEqual(invocations[0]?.args.at(-2), "get");
-			assert.equal(invocations.at(-1)?.args.at(-1), expectedPath);
+			assert.equal(invocations.find(entry => entry.args.includes("screenshot"))?.args.at(-1), expectedPath);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -1263,7 +1284,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { path } }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Save browser state." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const statePath = join(tempDir, "missing", "parents", "fixture-state.json");
@@ -1288,7 +1309,7 @@ test("agentBrowserExtension renders explicit --json tool content as JSON", { con
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Check stream status." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -1337,7 +1358,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Take a batch screenshot." });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {

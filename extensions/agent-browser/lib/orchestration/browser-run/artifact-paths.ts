@@ -1,9 +1,9 @@
 import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 
 import { foldAgentBrowserFilesystemIdentity } from "../../argv-grammar.js";
 import { parseWaitCommandTokens } from "../../argv-descriptor.js";
-import { getRecordCommandOperands } from "../../command-taxonomy.js";
+import { getRecordCommandOperandIndices, getRecordCommandOperands } from "../../command-taxonomy.js";
 
 const SCREENSHOT_IMAGE_EXTENSIONS = [".jpeg", ".jpg", ".png", ".webp"];
 
@@ -13,12 +13,13 @@ function isSingleScreenshotPathToken(token: string): boolean {
 	return explicitlyRelative || token.includes("/") || SCREENSHOT_IMAGE_EXTENSIONS.some((extension) => token.endsWith(extension));
 }
 
-function getScreenshotPositionalIndices(commandTokens: string[]): number[] {
+export function getScreenshotPositionalIndices(commandTokens: readonly string[]): number[] {
 	if (commandTokens[0] !== "screenshot") return [];
 	const positionalIndices: number[] = [];
 	for (let index = 1; index < commandTokens.length; index += 1) {
 		const token = commandTokens[index];
-		if (token === "--full" || token === "-f") continue;
+		if (token === "--full" || token === "-f" || token === "--if-changed") continue;
+		if (token === "--threshold") { index += 1; continue; }
 		positionalIndices.push(index);
 	}
 
@@ -38,17 +39,20 @@ export function getScreenshotPathTokenIndex(commandTokens: string[]): number | u
 
 const DIFF_SCREENSHOT_VALUE_FLAGS = new Set(["-b", "--baseline", "-o", "--output", "-s", "--selector", "-t", "--threshold"]);
 
-function getDiffScreenshotOutputPath(commandTokens: string[]): string | undefined {
-	let outputPath: string | undefined;
+export function getDiffFilePathIndices(commandTokens: string[]): { baseline?: number; output?: number } {
+	if (commandTokens[0] !== "diff" || !["snapshot", "screenshot"].includes(commandTokens[1])) return {};
+	const valueFlags = commandTokens[1] === "screenshot" ? DIFF_SCREENSHOT_VALUE_FLAGS : new Set(["-b", "--baseline", "-s", "--selector", "-d", "--depth"]);
+	const paths: { baseline?: number; output?: number } = {};
 	for (let index = 2; index < commandTokens.length; index += 1) {
 		const token = commandTokens[index];
-		if (!DIFF_SCREENSHOT_VALUE_FLAGS.has(token)) continue;
+		if (!valueFlags.has(token)) continue;
 		const value = commandTokens[index + 1];
-		if (value === undefined) return undefined;
-		if (token === "-o" || token === "--output") outputPath = value;
+		if (value === undefined) return {};
+		if (token === "-o" || token === "--output") paths.output = index + 1;
+		if (token === "-b" || token === "--baseline") paths.baseline = index + 1;
 		index += 1;
 	}
-	return outputPath;
+	return paths;
 }
 
 function canonicalizeArtifactPath(absolutePath: string, platform: NodeJS.Platform, seenSymlinks: Set<string>): string {
@@ -87,20 +91,29 @@ export function canonicalizeExplicitArtifactDestination(cwd: string, destination
 	return canonicalizeArtifactPath(resolve(cwd, destination), platform, new Set());
 }
 
-export function getExplicitArtifactDestination(commandTokens: string[]): string | undefined {
+export function getRecordContactSheetDestination(commandTokens: string[]): string | undefined {
+	const path = getRecordCommandOperands(commandTokens).path;
+	if (!path || !commandTokens.some((token) => token === "--contact-sheet" || token === "--contact-sheet-threshold")) return undefined;
+	const extension = extname(path);
+	return extension ? `${path.slice(0, -extension.length)}.contact-sheet.png` : undefined;
+}
+
+export function getExplicitArtifactDestinationIndex(commandTokens: string[]): number | undefined {
 	const command = commandTokens[0];
 	const subcommand = commandTokens[1];
-	if (command === "screenshot") {
-		const index = getScreenshotPathTokenIndex(commandTokens);
-		return index === undefined ? undefined : commandTokens[index];
-	}
-	if (command === "download") return commandTokens[2];
-	if (command === "pdf") return commandTokens[1];
-	if (command === "wait") return parseWaitCommandTokens(commandTokens).downloadPath;
-	if (command === "state" && subcommand === "save") return commandTokens[2];
-	if (command === "diff" && subcommand === "screenshot") return getDiffScreenshotOutputPath(commandTokens);
-	if (command === "network" && subcommand === "har" && commandTokens[2] === "stop") return commandTokens[3];
-	if ((command === "trace" || command === "profiler") && subcommand === "stop") return commandTokens[2];
-	if (command === "record") return getRecordCommandOperands(commandTokens).path;
+	if (command === "screenshot") return getScreenshotPathTokenIndex(commandTokens);
+	if (command === "download") return 2;
+	if (command === "pdf") return 1;
+	if (command === "wait") return parseWaitCommandTokens(commandTokens).downloadPathIndex;
+	if (command === "state" && subcommand === "save") return 2;
+	if (command === "diff" && subcommand === "screenshot") return getDiffFilePathIndices(commandTokens).output;
+	if (command === "network" && subcommand === "har" && commandTokens[2] === "stop") return 3;
+	if ((command === "trace" || command === "profiler") && subcommand === "stop") return 2;
+	if (command === "record") return getRecordCommandOperandIndices(commandTokens)[0];
 	return undefined;
+}
+
+export function getExplicitArtifactDestination(commandTokens: string[]): string | undefined {
+	const index = getExplicitArtifactDestinationIndex(commandTokens);
+	return index === undefined ? undefined : commandTokens[index];
 }

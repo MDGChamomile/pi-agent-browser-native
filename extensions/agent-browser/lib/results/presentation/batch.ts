@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+
 import { isCloseCommand } from "../../command-taxonomy.js";
 import { isRecord } from "../../parsing.js";
 import { getAgentBrowserSessionIdentityKey } from "../../argv-grammar.js";
@@ -29,6 +31,7 @@ import { buildPageChangeSummary } from "./navigation.js";
 import { appendSelectorRecoveryHint, getClipboardWritePayloadCandidates, isOverlayBlockedClickError, redactClipboardPermissionErrorValue } from "./errors.js";
 
 export interface BuildNestedToolPresentationOptions {
+	modelVisible?: boolean;
 	artifactManifest?: SessionArtifactManifest;
 	artifactMaxUpdatedAtMs?: number;
 	artifactMinUpdatedAtMs?: number;
@@ -37,6 +40,8 @@ export interface BuildNestedToolPresentationOptions {
 	commandInfo: CommandInfo;
 	cwd: string;
 	envelope?: AgentBrowserEnvelope;
+	errorText?: string;
+	piCleanupOwnership?: "caller-owned" | "wrapper-managed";
 	networkRouteDiagnostics?: NetworkRouteDiagnostic[];
 	namespace?: string;
 	persistentArtifactStore?: PersistentSessionArtifactStore;
@@ -214,6 +219,7 @@ function formatBatchStepsText(steps: Array<{ details: BatchStepPresentationDetai
 }
 
 async function buildBatchStepPresentation(options: {
+	modelVisible?: boolean;
 	artifactManifest?: SessionArtifactManifest;
 	artifactMaxUpdatedAtMs?: number;
 	artifactMinUpdatedAtMs?: number;
@@ -222,6 +228,7 @@ async function buildBatchStepPresentation(options: {
 	cwd: string;
 	index: number;
 	item: AgentBrowserBatchResult;
+	piCleanupOwnership?: "caller-owned" | "wrapper-managed";
 	namespace?: string;
 	networkRoutes?: NetworkRouteRecord[];
 	persistentArtifactStore?: PersistentSessionArtifactStore;
@@ -233,7 +240,7 @@ async function buildBatchStepPresentation(options: {
 	const commandText = formatBatchStepCommand(hasModelFacingArgRedaction(redactedCommand) ? redactedCommand : command, index);
 	const lifecycle = extractAgentBrowserLifecycle(item.result);
 
-	if (item.success === false) {
+	if (item.success === false && command?.[0] !== "record") {
 		const redactedErrorData = redactBatchStepErrorData(command, item.error);
 		const errorText = formatBatchStepError(redactedErrorData);
 		const failureCategory = classifyAgentBrowserFailureCategory({
@@ -288,6 +295,7 @@ async function buildBatchStepPresentation(options: {
 		? buildNetworkRouteDiagnostics(item.result, networkRoutes)
 		: undefined;
 	const presentation = await buildNestedToolPresentation({
+		modelVisible: options.modelVisible,
 		artifactManifest,
 		artifactMaxUpdatedAtMs,
 		artifactMinUpdatedAtMs,
@@ -295,7 +303,9 @@ async function buildBatchStepPresentation(options: {
 		commandInfo: commandInfoWithTokens,
 		cwd,
 		args: command,
-		envelope: { data: item.result, success: true },
+		envelope: { data: item.result, success: item.success !== false, error: item.error },
+		errorText: item.success === false ? formatBatchStepError(redactBatchStepErrorData(command, item.error)) : undefined,
+		piCleanupOwnership: options.piCleanupOwnership,
 		networkRouteDiagnostics,
 		namespace,
 		persistentArtifactStore,
@@ -348,6 +358,7 @@ async function buildBatchStepPresentation(options: {
 			fullOutputPaths: fullOutputPaths.length > 0 ? fullOutputPaths : undefined,
 			imagePath: imagePaths[0],
 			imagePaths: imagePaths.length > 0 ? imagePaths : undefined,
+			imageObservations: presentation.imageObservations,
 			index,
 			lifecycle,
 			networkRouteDiagnostics: presentation.networkRouteDiagnostics,
@@ -365,23 +376,29 @@ async function buildBatchStepPresentation(options: {
 	};
 }
 
-function abandonedRecordingArtifact(artifact: FileArtifactMetadata): FileArtifactMetadata {
+async function unverifiedRecordingArtifact(artifact: FileArtifactMetadata, subcommand: string): Promise<FileArtifactMetadata> {
 	const { recordingState: _recordingState, willExistOnStop: _willExistOnStop, ...terminal } = artifact;
-	return { ...terminal, exists: false, status: "missing", subcommand: "close-abandoned" };
+	try {
+		const file = await stat(artifact.absolutePath);
+		return { ...terminal, exists: file.isFile(), sizeBytes: file.size, status: file.isFile() ? "unverified" : "missing", subcommand };
+	} catch (error) {
+		const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+		return { ...terminal, exists: missing ? false : undefined, status: missing ? "missing" : "unverified", subcommand };
+	}
 }
 
-function coalesceTerminalBatchRecordingArtifacts(
+async function coalesceTerminalBatchRecordingArtifacts(
 	steps: Array<{ details: BatchStepPresentationDetails; presentation: ToolPresentation }>,
 	sessionName?: string,
 	namespace?: string,
-): FileArtifactMetadata[] {
+): Promise<FileArtifactMetadata[]> {
 	const artifacts: FileArtifactMetadata[] = [];
 	const pendingIndexesBySession = new Map<string, number[]>();
 	const removedPendingIndexes = new Set<number>();
 	for (const step of steps) {
 		for (const artifact of step.presentation.artifacts ?? []) {
 			const index = artifacts.push(artifact) - 1;
-			if (artifact.command !== "record" || artifact.kind !== "video") continue;
+			if (artifact.command !== "record") continue;
 			const session = artifact.session ? getAgentBrowserSessionIdentityKey(artifact.session, artifact.namespace) : "";
 			if (isPendingRecordingArtifact(artifact)) {
 				const pendingIndexes = pendingIndexesBySession.get(session) ?? [];
@@ -389,21 +406,30 @@ function coalesceTerminalBatchRecordingArtifacts(
 				pendingIndexesBySession.set(session, pendingIndexes);
 				continue;
 			}
-			const pendingIndex = pendingIndexesBySession.get(session)?.pop();
-			if (pendingIndex !== undefined) removedPendingIndexes.add(pendingIndex);
+			const pendingIndexes = pendingIndexesBySession.get(session) ?? [];
+			const matchingIndex = pendingIndexes.map((pendingIndex) => artifacts[pendingIndex].kind).lastIndexOf(artifact.kind);
+			if (matchingIndex !== -1) removedPendingIndexes.add(pendingIndexes.splice(matchingIndex, 1)[0]);
+			if (artifact.kind === "video") {
+				// A terminal video also ends its pending sheet; a reported sheet below
+				// replaces this unverified row, while legacy restart output may omit it.
+				for (const pendingIndex of pendingIndexes) {
+					if (artifacts[pendingIndex].kind === "image" && isPendingRecordingArtifact(artifacts[pendingIndex])) artifacts[pendingIndex] = await unverifiedRecordingArtifact(artifacts[pendingIndex], artifact.subcommand ?? "stop");
+				}
+			}
 		}
 		const command = step.details.command;
 		if (step.details.success !== true || !command || !isCloseCommand(extractUpstreamCommandTokens(command)[0])) continue;
 		const session = sessionName ? getAgentBrowserSessionIdentityKey(sessionName, namespace) : "";
 		for (const pendingIndex of pendingIndexesBySession.get(session) ?? []) {
 			const pending = artifacts[pendingIndex];
-			if (pending && !removedPendingIndexes.has(pendingIndex)) artifacts[pendingIndex] = abandonedRecordingArtifact(pending);
+			if (pending && isPendingRecordingArtifact(pending) && !removedPendingIndexes.has(pendingIndex)) artifacts[pendingIndex] = await unverifiedRecordingArtifact(pending, "close-abandoned");
 		}
 	}
 	return artifacts.filter((_, index) => !removedPendingIndexes.has(index));
 }
 
 export async function buildBatchPresentation(options: {
+	modelVisible?: boolean;
 	artifactManifest?: SessionArtifactManifest;
 	artifactMaxUpdatedAtMs?: number;
 	artifactMinUpdatedAtMs?: number;
@@ -411,6 +437,7 @@ export async function buildBatchPresentation(options: {
 	buildNestedToolPresentation: BuildNestedToolPresentation;
 	cwd: string;
 	data: AgentBrowserBatchResult[];
+	piCleanupOwnership?: "caller-owned" | "wrapper-managed";
 	namespace?: string;
 	networkRoutes?: NetworkRouteRecord[];
 	persistentArtifactStore?: PersistentSessionArtifactStore;
@@ -424,6 +451,7 @@ export async function buildBatchPresentation(options: {
 	let currentNetworkRoutes = networkRoutes;
 	for (const [index, item] of data.entries()) {
 		const step = await buildBatchStepPresentation({
+			modelVisible: options.modelVisible,
 			artifactManifest: currentArtifactManifest,
 			artifactMaxUpdatedAtMs: options.artifactMaxUpdatedAtMs,
 			artifactMinUpdatedAtMs: options.artifactMinUpdatedAtMs,
@@ -432,6 +460,7 @@ export async function buildBatchPresentation(options: {
 			cwd,
 			index,
 			item,
+			piCleanupOwnership: options.piCleanupOwnership,
 			namespace,
 			networkRoutes: currentNetworkRoutes,
 			persistentArtifactStore: persistentArtifactStore ? { ...persistentArtifactStore, protectedPaths: protectedPersistentPaths } : undefined,
@@ -450,7 +479,7 @@ export async function buildBatchPresentation(options: {
 
 	const batchFailure = getBatchFailureDetails(steps);
 	const images = steps.flatMap((step) => getPresentationImages(step.presentation));
-	const artifacts = coalesceTerminalBatchRecordingArtifacts(steps, sessionName, namespace);
+	const artifacts = await coalesceTerminalBatchRecordingArtifacts(steps, sessionName, namespace);
 	const artifactVerification = buildArtifactVerificationSummary(artifacts);
 	const fullOutputPaths = steps.flatMap((step) => getPresentationPaths({
 		primaryPath: step.presentation.fullOutputPath,
@@ -463,13 +492,13 @@ export async function buildBatchPresentation(options: {
 	const redactedBatchData = steps.map(({ details }) => (
 		details.success
 			? { command: details.command, result: details.data, success: true }
-			: { command: details.command, error: details.text, success: false }
+			: { command: details.command, error: details.text, ...(details.command?.[0] === "record" ? { result: details.data } : {}), success: false }
 	));
 	const unverifiedMutationCount = steps.filter((step) => step.details.pageChangeSummary?.changeType === "mutation" && step.details.pageChangeSummary.observed === false).length;
 	const mutationEvidenceText = unverifiedMutationCount > 0
 		? `Mutation evidence: ${unverifiedMutationCount} action result${unverifiedMutationCount === 1 ? " proves" : "s prove"} dispatch only, not application state change. Use explicit later assertions or external receipts as postconditions; fixed waits are not postconditions.`
 		: undefined;
-	const stepText = formatBatchStepsText(steps);
+	const stepText = options.modelVisible === false ? "" : formatBatchStepsText(steps);
 	const batchSummary = batchFailure === undefined
 		? summary
 		: `Batch failed: ${batchFailure.successCount}/${batchFailure.totalCount} succeeded`;
@@ -521,13 +550,14 @@ export async function buildBatchPresentation(options: {
 		artifacts: artifacts.length > 0 ? artifacts : undefined,
 		batchFailure,
 		batchSteps: steps.map((step) => step.details),
-		content: [{ type: "text", text: contentText }, ...images],
+		content: options.modelVisible === false ? [] : [{ type: "text", text: contentText }, ...images],
 		failureCategory: batchFailure?.failedStep.failureCategory,
 		data: redactedBatchData,
 		fullOutputPath: fullOutputPaths[0],
 		fullOutputPaths: fullOutputPaths.length > 0 ? fullOutputPaths : undefined,
 		imagePath: imagePaths[0],
 		imagePaths: imagePaths.length > 0 ? imagePaths : undefined,
+		imageObservations: steps.flatMap(step => step.presentation.imageObservations ?? []),
 		nextActions,
 		pageChangeSummary,
 		resultCategory: batchFailure ? "failure" : "success",

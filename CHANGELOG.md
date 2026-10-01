@@ -2,6 +2,153 @@
 
 ## Unreleased
 
+### Changed
+
+- Update the official Pi validation graph to 0.99.2; wildcard runtime peers and the Pi 0.87.0 minimum remain unchanged.
+- Persist small canonical browser begin/finish events, complete ref definitions once per capture, and artifact-row changes instead of repeating full state after ordinary commands. Tool results retain invocation receipts and dedicated capture/export data.
+- Replay selected journal envelopes and winning definitions through public Pi APIs with bounded token parsing on official and fork hosts. Stock official Pi's own eager loader remains a separate limitation.
+- Add `pi-agent-browser-convert` for validated offline separate-copy conversion of stopped legacy sessions, preserving original bytes, ancestry, explicit observations and source-owner cleanup facts.
+
+### Fixed
+
+- Restore extension startup in consumer installs by replaying native tool-name deltas without a dynamic host-package import (#210, #207).
+- Expose an object-rooted Electron tool schema for strict providers while preserving action-specific validation (#214).
+- Report QA checks not reached after a fail-fast error separately from executed failures, retain the redacted cause, and keep missing execution evidence unknown.
+- Prevent dispatch after an unconfirmed begin, stop dependent code after an unconfirmed finish, and preserve observed native lifecycle effects through presentation/export failure.
+- Invalidate refs on changed or unverifiable native daemon generations, including same-URL replacement and helper captures. Restart reuses wrapper-owned launch provenance only after matching the native generation and restore key; ordinary forks cannot inherit parent Electron/script cleanup rights.
+
+## 0.8.2 - 2026-09-27
+
+### Added
+
+- Supply extension-owned browser discovery metadata on capable Pi hosts, including conditional web search, without a user-maintained settings inventory. Official Pi retains its ordinary entry tools and lazy advanced loader.
+
+### Fixed
+
+- Prepare complete deferred browser instructions for generic prompts so same-run discovery reveals them before the first browser action.
+
+## 0.8.1 - 2026-09-26
+
+### Fixed
+
+- Enforce the complete Node 24.21.0 minimum in platform qualification instead of accepting any Node 24 release.
+
+## 0.8.0 - 2026-09-26
+
+### Breaking Changes
+
+- Require Node.js 24.21.0 or newer.
+
+### Changed
+
+- Update the official Pi validation graph to 0.87.1, adopt TypeScript 7, npm 12, and the latest compatible development tooling, and remove stale transitive dependency overrides.
+- Qualify official Pi, the forked Pi host, package smoke, native checkpoints, and platform builds on Node 24.
+
+### Fixed
+
+- Keep lifecycle sentinel replacement byte-stable outside its generated block without retaining the removed TypeScript compiler API.
+
+## 0.7.1 - 2026-09-22
+
+### Fixed
+
+- Defer the native replay helper import until awaited session restoration, preserving fast package registration and the complete restored tool surface. Public browser commands and saved-session behavior remain unchanged.
+
+## 0.7.0 - 2026-09-22
+
+### Changed
+
+- Keep `agent_browser` focused on native commands and batches. Replace its `script` input with `agent_browser_code`, whose fresh JavaScript context controls the same persistent browser and authentication as direct calls.
+- Replace the `job` DSL with native batch/code. Move actions, QA, Electron, and source lookups to five flat tools discovered through `agent_browser_tools`; activation uses Pi's native additive tool history.
+- Return bounded browser observations with exact recovery actions and explicit JSON/image selection from code. Report measured screenshot pixel/CSS geometry and unknown mappings without guessing coordinates.
+- Coordinate cooperating Pi processes across complete helper/action operations and whole code calls. Persist ordered browser-state transitions so interrupted code and branch replay retain truthful page/ref state.
+- Preserve the captured execution directory across queued direct/code calls while browser/configuration and recording ownership remain anchored.
+- Require Pi 0.87.0 and compose browser guidance through native prompt sections. Keep upstream `agent-browser` separately installed.
+
+See the [migration guide](docs/TOOL_CONTRACT.md#07-migration). Restart participating Pi processes after upgrading; mixed package versions do not share the new coordination guarantee.
+
+## 0.6.17 - 2026-09-22
+
+### Fixed
+
+- Follow `pi-change-working-dir` for new browser file paths and source scans using one invocation snapshot, while retaining browser/config/restore/recording ownership. Explicit fresh/config launches honor the selected directory; an unavailable original launch directory returns clear recovery guidance without silently switching project config.
+
+## 0.6.16 - 2026-09-21
+
+### Qualification
+
+- The owner waived Windows qualification for this rollout on 2026-09-21; Windows failures remain visible and nonblocking, not passed. Linux/macOS, Node floors, official/fork consumer checks and all three final reviewer approvals remain required before merge, release or activation.
+- Track unresolved Windows policy-lock and restored Electron cleanup failures in [#191](https://github.com/fitchmultz/pi-agent-browser-native/issues/191). The unchanged Electron repeat passed once without a product patch; its original cause remains unknown. Earlier passing focused Windows controls are bounded evidence, not full-suite qualification. Failed private Windows candidates are not integrated.
+
+### Fixed
+
+- Validate explicit Windows socket directories using native directory semantics instead of requiring POSIX ownership metadata.
+- Start the config CLI correctly on Windows and encoded or symlinked paths using Node's native entrypoint identity, while keeping module imports silent.
+- Redact bearer credentials followed by Windows path separators in diagnostic text.
+- Await Windows process-tree termination before returning from browser timeouts or cancellation.
+- Preserve literal newlines through agent-browser's recognized global npm Windows CMD launcher by invoking that installation's native executable directly; custom and unrecognized launchers retain their existing behavior.
+- Allow ten seconds for native Windows process-identity queries, including PowerShell startup, while preserving the identity format and five-second POSIX budget.
+- Await tracked Electron process exit before removing its profile and reporting cleanup complete.
+- Inspect native Windows process command lines when verifying ownership of restored Electron launches.
+- Recognize native Windows absolute checkout paths when checking for duplicate extension sources.
+- Recheck released managed-session policy claims after PID inspection so a completed owner does not leave a stale busy result.
+- Refresh transient choosing tickets so a later managed-session contender cannot block its predecessor after publishing its ticket.
+- Retry native Windows open-file rename conflicts during owned policy-claim cleanup, with token revalidation and a fresh one-second retry window even after long browser shutdowns.
+
+## 0.6.15 - 2026-09-18
+
+### Fixed
+
+- Apply ordinary credential redaction to page/origin/URL-filtered network results before structured details and `outputPath` exports.
+- Leave every download's click and file transfer to native download, including loopback links, generated Blob exports, and redirects; remove the anchor-fetch shortcut that could save page HTML as an export.
+- Verify click-probe candidate identity with native selector/ref attribute readback, including XPath scope; clean up and abstain when identity is unproven instead of falsely failing a completed click or recommending a duplicate action.
+- Scroll CSS containers instantly before measuring movement so smooth-scroll styles cannot cause false no-movement failures.
+- Preserve explicitly requested JSON for early snapshot/network filters, scroll results, and preparation failures, retaining metadata in `details` without output-file prose; help/version remains native text.
+
+### Tests
+
+- Add native browser regressions for filtered credential redaction, generated Blob download bytes, accessible-name click identity, smooth container movement, and filtered snapshot JSON, alongside deterministic cleanup and early-result output checks.
+
+## 0.6.14 - 2026-09-17
+
+### Changed
+
+- Recommend `agent-browser` 0.38.1 while retaining the stable 0.35.0 minimum and separate upstream installation.
+- Support native delta snapshots and persistent refs without treating partial revisions as empty pages; keep native delta baselines upstream-owned.
+- Preserve conditional screenshot options and skipped-image results without inventing files or attaching old images.
+- Parse session pointer modes and recording cursor/contact-sheet options, verify contact-sheet images, and surface native WebMCP catalog updates. Document stateful auth login and native recording timing fixes.
+
+### Fixed
+
+- Give automatic managed-session cleanup the normal 35-second command budget, rather than aborting during native Chrome's five-second shutdown grace. Explicit cleanup-timeout overrides remain supported. Report cleanup deadlines with the phase and elapsed time instead of incorrectly reporting caller cancellation.
+
+## 0.6.13 - 2026-09-14
+
+### Fixed
+
+- Suppress Chrome's extra startup window using stock `--no-startup-window`, preserving headless defaults and composing caller launch arguments. URL-less `open` now uses native lazy URL reads so active pages keep their browser, profile, and URL across direct, batch, and script calls. External engines and attachments remain unchanged.
+
+### Changed
+
+- Give ordinary browser calls a native session and restore key per root Pi session. Parent/descendant groups share one browser without a global queue or child-exit teardown. Scope named Chrome profile bootstrap to automatic roots; preserve explicit browsers, script, and Electron isolation.
+
+### Validation
+
+- Start managed-lifecycle release checks explicitly in fresh mode; retain root-session ownership without leaving test browsers open.
+
+## 0.6.12 - 2026-09-13
+
+### Fixed
+
+- Make QA non-pass when final page-error rows match a nonempty post-clear baseline. Report “page-error check could not be verified” instead of ignoring matches as unchanged; preserve separate novel-error counts, clean passes, and explicit `checkErrors: false` checks.
+
+### Validation
+
+- Keep real-browser fixture probes on the correct owned daemon and use matching private socket directories; preserve the cold first-snapshot and 12-second recording checks.
+- Add a native hosted-Windows PR gate using the existing packed-Pi and browser suites. Document direct local macOS qualification without Remote Login; neither alternative is a Crabbox SSH/Parallels pass.
+
+## 0.6.11 - 2026-09-12
+
 ### Added
 
 - Set `PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES=0` to disable automatic persistent-session spill eviction. The default remains 32 MiB; positive limits and temporary spill cleanup are unchanged.
@@ -9,9 +156,26 @@
 
 ### Fixed
 
-- Report QA checks that were not reached after a fail-fast batch error separately from failed checks. Failure output now leads with the redacted causal error and shows executed versus planned batch steps without claiming that unreached text assertions failed.
+- Keep explicit URL reads and all-read batches out of browser preflights, managed-session replacement and timeout page probes. Preserve existing owned daemon settings and unsaved page state across reads, including after reload/resume.
+- Keep read-first scripts connected to the daemon created by their fresh isolated session, including after a failed HTTP read, without enabling restore or adding browser preflights.
+- Preserve policy-required read confirmations in the correct native session; only native ID-check capability enables browser-independent confirm/deny, including when the DOM target is unknown. Report failed confirmed reads as failures on older natives too, and retain the correct actions when a new DOM confirmation replaces a pending read.
+- Resolve source-build dependencies through their ESM exports so Git installs and package preparation do not reinstall dependencies that are already available.
+- Separate daemon and browser identity in `session info`, including native ownership versus Pi cleanup ownership and explicit unknowns for unavailable fields. Timed-out status checks preserve page state and offer a status-only retry.
+- Carry native recording receipts and actual capture/encoder measurements through direct, restart and batch results, including failures. Recover uncertain stops with one bounded, identity-matched native receipt query; keep original attempt evidence and export failed or recovered recording receipts without overwriting artifacts.
+- Preserve harmless bearer technical prose and unchanged URL spelling. Credential replacements remain visibly marked, and structured results use the same URL redaction as visible text and exports.
+- Redact `authorization_session_id` in URLs, including contextual `state` / `nonce`, from model-visible content, details, and explicit result exports while preserving ordinary query values.
+- Preserve nested serialized JSON, duplicate members and exact numeric literals during redaction; scrub auth URL keys and adjacent secrets before plaintext formatting.
+- Bound eval and get summaries for large single-line output while retaining complete source in spills and exports.
 - Honor configured native session/namespace defaults as caller-owned browsers across Pi sessions, including ordinary structured calls and helpers, without imposing implicit-session idle policy or quit cleanup.
 - Keep disposable script sessions out of native user/project profile defaults by using an empty temporary config through execution and cleanup. Reject inner `--config` overrides without restricting ordinary native `args`.
+
+### Known limitations
+
+- Full native browser-independent read/confirmation behavior, live browser identity, and detailed recording receipts require matching upstream support, currently in unmerged [agent-browser PR #1844](https://github.com/vercel-labs/agent-browser/pull/1844). Public 0.37.1 lacks these companion fixes; wrapper-owned read continuity does not add missing native capabilities. Missing native facts remain unknown; absent evidence does not imply a guarantee.
+
+### Validation
+
+- The macOS-SSH and native-Windows platform gates were explicitly waived for this release and were not run. Permanent release gates are unchanged.
 
 ## 0.6.10 - 2026-09-08
 

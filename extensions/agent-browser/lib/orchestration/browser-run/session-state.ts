@@ -1,8 +1,11 @@
 import { rm } from "node:fs/promises";
 
+import { getScreenshotPositionalIndices } from "./artifact-paths.js";
+import { observeNativeWebMcp } from "../../webmcp-observation.js";
+
 import { getAgentBrowserSessionIdentityKey } from "../../argv-grammar.js";
 import { parseArgvDescriptor } from "../../argv-descriptor.js";
-import { needsManagedSession } from "../../command-policy.js";
+import { isBrowserIndependentRead, needsManagedSession } from "../../command-policy.js";
 import type { PersistentSessionArtifactStore } from "../../temp.js";
 import type { ElectronLaunchStatus } from "../../electron/cleanup.js";
 import type { ElectronCdpTarget, ElectronLaunchRecord } from "../../electron/launch.js";
@@ -351,11 +354,11 @@ function collectRefsFromTokens(tokens: readonly string[]): string[] {
 	if (!isRefGuardedCommand(tokens[0]) || (tokens[0] === "diff" && tokens[1] !== "screenshot")) return [];
 	let selectors: readonly (string | undefined)[];
 	switch (tokens[0]) {
-		case "click": selectors = [tokens.slice(1).find((token) => token !== "--new-tab")]; break;
+		case "click": selectors = [tokens.slice(1).find((token) => token !== "--new-tab" && token !== "--human")]; break;
 		case "drag": selectors = tokens.slice(1, 3); break;
 		case "get": selectors = [!["url", "title", "cdp-url", "count"].includes(tokens[1]) ? tokens[2] : undefined]; break;
 		case "is": selectors = [tokens[2]]; break;
-		case "screenshot": selectors = [tokens.slice(1).find((token) => !["--full", "-f"].includes(token))]; break;
+		case "screenshot": selectors = [tokens[getScreenshotPositionalIndices(tokens)[0]]]; break;
 		case "diff":
 		case "scroll": {
 			let selector: string | undefined;
@@ -491,7 +494,7 @@ export function shouldPinSessionTabForCommand(options: {
 	sessionName?: string;
 	stdin?: string;
 }): boolean {
-	if (!options.pinningRequired || !options.sessionName || !options.command) return false;
+	if (!options.pinningRequired || !options.sessionName || !options.command || isBrowserIndependentRead(options.commandTokens, options.stdin)) return false;
 	const steps = options.command === "batch" ? getUpstreamEffectiveBatchSteps(options.commandTokens, options.stdin) : [options.commandTokens];
 	for (const step of steps) {
 		const descriptor = parseArgvDescriptor(step);
@@ -501,7 +504,7 @@ export function shouldPinSessionTabForCommand(options: {
 		if (commandChoosesSessionTabTarget(tokens)) return false;
 		if (!needsManagedSession(descriptor) || isSessionTabPinningExcludedCommand(command)) continue;
 		if (command === "get" && subcommand === "url" && !options.reopenPending) continue;
-		if (command === "read" && findFirstPositionalArgument(tokens) !== undefined) continue;
+		if (command === "record" && subcommand === "stop") continue;
 		if (["console", "errors"].includes(command)) continue;
 		if (command === "network" && !(subcommand === "requests" && tokens.some((token) => ["--current-page", "--current-origin", "--current-url"].includes(token)))) continue;
 		return true;
@@ -518,16 +521,21 @@ export function shouldCorrectSessionTabAfterCommand(options: { command?: string;
 	);
 }
 
-function getTabSelection(tab: { index?: number; label?: string; tabId?: string }): Pick<OpenResultTabCorrection, "selectedTab" | "selectionKind"> | undefined {
+function getTabSelection(tab: { index?: number; label?: string; tabId?: string; targetId?: string }): Pick<OpenResultTabCorrection, "selectedTab" | "selectionKind"> | undefined {
+	if (tab.targetId) return { selectedTab: tab.targetId, selectionKind: "targetId" };
 	if (typeof tab.tabId === "string" && tab.tabId.trim().length > 0) return { selectedTab: tab.tabId.trim(), selectionKind: "tabId" };
 	if (typeof tab.label === "string" && tab.label.trim().length > 0) return { selectedTab: tab.label.trim(), selectionKind: "label" };
 	return typeof tab.index === "number" ? { selectedTab: String(tab.index), selectionKind: "index" } : undefined;
 }
 
 function selectSessionTargetTab(options: {
-	tabs: Array<{ active?: boolean; index?: number; label?: string; tabId?: string; title?: string; url?: string }>;
+	tabs: Array<{ active?: boolean; index?: number; label?: string; tabId?: string; targetId?: string; title?: string; url?: string }>;
 	target: SessionTabTarget;
 }): OpenResultTabCorrection | undefined {
+	if (options.target.targetId) {
+		const target = selectAnySessionTargetTab(options);
+		return target && options.tabs.find((tab) => tab.targetId === options.target.targetId)?.active !== true ? target : undefined;
+	}
 	return chooseOpenResultTabCorrection({
 		tabs: options.tabs,
 		targetTitle: options.target.title,
@@ -536,12 +544,14 @@ function selectSessionTargetTab(options: {
 }
 
 function selectAnySessionTargetTab(options: {
-	tabs: Array<{ active?: boolean; index?: number; label?: string; tabId?: string; title?: string; url?: string }>;
+	tabs: Array<{ active?: boolean; index?: number; label?: string; tabId?: string; targetId?: string; title?: string; url?: string }>;
 	target: SessionTabTarget;
 }): OpenResultTabCorrection | undefined {
 	const targetUrl = typeof options.target.url === "string" ? normalizeComparableUrl(options.target.url) : undefined;
 	if (!targetUrl) return undefined;
-	const matchingTabs = options.tabs.filter((tab) => normalizeComparableUrl(tab.url ?? "") === targetUrl);
+	const matchingTabs = options.tabs.filter((tab) => options.target.targetId
+		? tab.targetId === options.target.targetId
+		: normalizeComparableUrl(tab.url ?? "") === targetUrl);
 	const targetTitle = options.target.title?.trim() ?? "";
 	const titledTabs = targetTitle ? matchingTabs.filter((tab) => tab.title?.trim() === targetTitle) : [];
 	const selectedTab = titledTabs.find((tab) => tab.active) ?? titledTabs[0] ?? matchingTabs.find((tab) => tab.active) ?? matchingTabs[0];
@@ -594,6 +604,7 @@ export async function runSessionCommandData(options: {
 			if (throwOnFailure) throw new Error(parsed.parseError ? "agent-browser returned invalid structured output" : "agent-browser reported failure");
 			return undefined;
 		}
+		observeNativeWebMcp(parsed.envelope?.data);
 		return parsed.envelope?.data;
 	} finally {
 		if (processResult.stdoutSpillPath) {
@@ -620,22 +631,40 @@ export async function collectOpenResultTabCorrection(options: {
 		index: typeof tab.index === "number" ? tab.index : index,
 		label: typeof tab.label === "string" ? tab.label : undefined,
 		tabId: typeof tab.tabId === "string" ? tab.tabId : undefined,
+		targetId: typeof tab.targetId === "string" ? tab.targetId : undefined,
 		title: typeof tab.title === "string" ? tab.title : undefined,
 		url: typeof tab.url === "string" ? tab.url : undefined,
 	}));
 	return chooseOpenResultTabCorrection({ tabs, targetTitle, targetUrl });
 }
 
-function mapTabData(tabData: unknown): Array<{ active?: boolean; index?: number; label?: string; tabId?: string; title?: string; url?: string }> | undefined {
+function mapTabData(tabData: unknown): Array<{ active?: boolean; index?: number; label?: string; tabId?: string; targetId?: string; title?: string; url?: string }> | undefined {
 	if (!isRecord(tabData) || !Array.isArray(tabData.tabs)) return undefined;
 	return tabData.tabs.filter(isRecord).map((tab, index) => ({
 		active: tab.active === true,
 		index: typeof tab.index === "number" ? tab.index : index,
 		label: typeof tab.label === "string" ? tab.label : undefined,
 		tabId: typeof tab.tabId === "string" ? tab.tabId : undefined,
+		targetId: typeof tab.targetId === "string" ? tab.targetId : undefined,
 		title: typeof tab.title === "string" ? tab.title : undefined,
 		url: typeof tab.url === "string" ? tab.url : undefined,
 	}));
+}
+
+export async function collectSessionTabTarget(options: {
+	cwd: string;
+	namespace?: string;
+	sessionName?: string;
+	signal?: AbortSignal;
+	target: SessionTabTarget;
+}): Promise<SessionTabTarget> {
+	const tabs = mapTabData(await runSessionCommandData({ ...options, args: ["tab", "list"] }));
+	const active = tabs?.find((tab) => tab.active);
+	const observedUrl = normalizeComparableUrl(options.target.url);
+	if (normalizeComparableUrl(active?.url) !== observedUrl && tabs?.some((tab) => normalizeComparableUrl(tab.url) === observedUrl)) return options.target;
+	return active?.targetId
+		? { ...options.target, targetId: active.targetId }
+		: options.target;
 }
 
 export async function collectSessionTabSelection(options: {
@@ -664,11 +693,17 @@ export async function ensureSessionTabTarget(options: {
 	const correction = tabs && selectAnySessionTargetTab({ tabs, target: options.target });
 	const error = "agent-browser could not re-select and verify the intended tab before running the command. Run tab list and select the intended tab, then snapshot -i before retrying.";
 	if (!correction) return { error };
+	const verifyUrl = async (tab: NonNullable<typeof active>) => {
+		if (normalizeComparableUrl(tab.url) === normalizeComparableUrl(options.target.url)) return true;
+		// Native tab metadata can retain the attempted URL while get url reports Chrome's error page.
+		const data = await runSessionCommandData({ ...options, args: ["get", "url"] });
+		return normalizeComparableUrl(extractStringResultField(data, "url")) === normalizeComparableUrl(options.target.url);
+	};
 	// Native tab selection clears refs and frame scope even when selecting the current tab.
-	if (active && getTabSelection(active)?.selectedTab === correction.selectedTab) return {};
+	if (active && getTabSelection(active)?.selectedTab === correction.selectedTab) return await verifyUrl(active) ? {} : { error };
 	if (!await applyOpenResultTabCorrection({ ...options, correction })) return { correction, error };
 	const selected = (await readTabs())?.find((tab) => tab.active);
-	return selected && getTabSelection(selected)?.selectedTab === correction.selectedTab && normalizeComparableUrl(selected.url ?? "") === normalizeComparableUrl(options.target.url)
+	return selected && getTabSelection(selected)?.selectedTab === correction.selectedTab && await verifyUrl(selected)
 		? { correction }
 		: { correction, error };
 }

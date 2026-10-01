@@ -55,7 +55,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -80,7 +80,7 @@ process.stdin.on("end", () => {
 			assert.equal(sourceLookup?.status, "candidates-found");
 			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "react-inspect" && candidate.file === "src/Button.tsx" && candidate.line === 17 && candidate.confidence === "high"));
 			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "dom-attribute" && candidate.file === "src/Button.tsx" && candidate.line === 17 && candidate.column === 5));
-			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.componentName === "Panel" && candidate.file?.endsWith("src/Panel.tsx")));
+			assert.ok(sourceLookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.componentName === "Panel" && candidate.file?.endsWith(join("src", "Panel.tsx"))));
 			const invocations = await readInvocationLog(logPath);
 			assert.deepEqual(invocations[0]?.args.slice(-1), ["batch"]);
 		});
@@ -150,7 +150,7 @@ process.stdin.on("end", () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
-			const launchResult = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "launch", appPath: app.appPath } });
+			const launchResult = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "launch", appPath: app.appPath, appArgs: app.appArgs } });
 			assert.equal(launchResult.isError, false);
 			const launch = (launchResult.details?.electron as { launch: { appPath?: string; executablePath?: string; launchId: string; sessionName: string; userDataDir: string } }).launch;
 
@@ -177,14 +177,14 @@ process.stdin.on("end", () => {
 				sessionName: launch.sessionName,
 				url: "app://packaged",
 			});
-			assert.ok(sourceLookup?.limitations?.some((item) => item.includes("Pi tool session cwd")));
+			assert.ok(sourceLookup?.limitations?.some((item) => item.includes("captured execution directory")));
 			assert.ok(sourceLookup?.limitations?.some((item) => item.includes("app.asar")));
-			const nextActions = lookupResult.details?.nextActions as Array<{ id: string; params?: { args?: string[]; electron?: { action?: string; launchId?: string } } }> | undefined;
+			const nextActions = lookupResult.details?.nextActions as Array<{ id: string; params?: { args?: string[]; action?: string; launchId?: string } }> | undefined;
 			const actionIds = new Set(nextActions?.map((action) => action.id));
 			assert.equal(actionIds.has("snapshot-electron-session"), true);
 			assert.equal(actionIds.has("probe-electron-launch"), true);
 			assert.equal(actionIds.has("list-electron-tabs"), true);
-			assert.ok(nextActions?.some((action) => action.id === "probe-electron-launch" && action.params?.electron?.launchId === launch.launchId));
+			assert.ok(nextActions?.some((action) => action.id === "probe-electron-launch" && action.params?.launchId === launch.launchId));
 			assert.ok(nextActions?.some((action) => action.id === "snapshot-electron-session" && action.params?.args?.includes(launch.sessionName)));
 
 			const cleanupResult = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "cleanup", launchId: launch.launchId } });
@@ -320,8 +320,8 @@ process.stdin.on("end", () => {
 			assert.doesNotMatch(JSON.stringify(lookup), /secret|user:pass|ok=1/);
 			assert.doesNotMatch(JSON.stringify(result), /secret|user:pass|ok=1/);
 			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "initiator" && candidate.file === "src/api.ts" && candidate.line === 1));
-			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.file?.endsWith("src/api.ts") && candidate.line === 1));
-			assert.equal(lookup?.candidates?.some((candidate) => candidate.file === "src/ok.ts" || candidate.file?.endsWith("src/ok.ts")), false);
+			assert.ok(lookup?.candidates?.some((candidate) => candidate.source === "workspace-search" && candidate.file?.endsWith(join("src", "api.ts")) && candidate.line === 1));
+			assert.equal(lookup?.candidates?.some((candidate) => candidate.file === "src/ok.ts" || candidate.file?.endsWith(join("src", "ok.ts"))), false);
 
 			const requestOnlyResult = await executeRegisteredTool(harness.tool, harness.ctx, {
 				networkSourceLookup: { requestId: "req-1" },
@@ -346,10 +346,13 @@ process.stdin.on("end", () => {
 			assert.deepEqual(defaultNamespaceCompiled?.args, ["--namespace", "", "--session", "named", "batch"]);
 
 			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations[0]?.args.slice(-1), ["batch"]);
-			assert.deepEqual(invocations[2]?.args.slice(-2), ["get", "url"]);
-			assert.deepEqual(invocations[3]?.args.slice(-5), ["--namespace", "review", "--session", "named", "batch"]);
-			assert.ok(invocations.some((invocation) => JSON.stringify(invocation.args.slice(-5)) === JSON.stringify(["--namespace", "", "--session", "named", "batch"])));
+			assert.deepEqual(invocations.filter((entry) => entry.args.at(-1) === "batch").map((entry) => entry.args.slice(-5)), [
+				["--json", "--session", String(result.details?.sessionName), "batch"],
+				["--json", "--session", String(requestOnlyResult.details?.sessionName), "batch"],
+				["--namespace", "review", "--session", "named", "batch"],
+				["--namespace", "", "--session", "named", "batch"],
+			]);
+			assert.ok(invocations.some((entry) => entry.args.slice(-2).join(" ") === "get url"));
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });

@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { createManagedSessionRestoreKey, getManagedSessionRestoreScope } from "../extensions/agent-browser/lib/managed-session-restore.js";
+import { createManagedSessionRestoreKey, getManagedSessionRestoreScope, ManagedSessionRestoreState, withOwnedManagedSessionContext } from "../extensions/agent-browser/lib/managed-session-restore.js";
 import { getAgentBrowserSocketDir, runAgentBrowserProcess } from "../extensions/agent-browser/lib/process.js";
 import { collectClickDispatchDiagnostic, prepareClickDispatchProbe } from "../extensions/agent-browser/lib/orchestration/browser-run/click-dispatch.js";
 import { CAPABILITY_BASELINE } from "../scripts/agent-browser-capability-baseline.mjs";
@@ -23,6 +23,7 @@ import { MINIMUM_AGENT_BROWSER_VERSION, isSupportedAgentBrowserVersion } from ".
 import {
 	createExtensionHarness,
 	createToolBranchEntry,
+	DOWNLOAD_FIXTURE_CONTENT,
 	executeRegisteredTool,
 	runExtensionEvent,
 	startAgentBrowserContractFixtureServer,
@@ -137,18 +138,18 @@ async function initializeGitProject(path: string): Promise<void> {
 	await execFileAsync("git", ["init", "-q", path]);
 }
 
-async function closeManagedSessionIfPresent(options: { cwd: string; sessionName?: string }): Promise<void> {
+async function closeManagedSessionIfPresent(options: { cwd: string; sessionName?: string; socketDir?: string }): Promise<void> {
 	if (!options.sessionName) return;
 	await runAgentBrowserProcess({
 		args: ["--json", "--namespace", "", "--session", options.sessionName, "close"],
 		cwd: options.cwd,
-		env: { AGENT_BROWSER_SOCKET_DIR: process.env.PI_AGENT_BROWSER_SOCKET_DIR ?? getAgentBrowserSocketDir() },
+		env: { AGENT_BROWSER_SOCKET_DIR: options.socketDir ?? process.env.PI_AGENT_BROWSER_SOCKET_DIR ?? getAgentBrowserSocketDir(), ...(options.socketDir ? { PI_AGENT_BROWSER_SOCKET_DIR: options.socketDir } : {}) },
 	}).catch(() => undefined);
 }
 
-async function assertRealUpstreamUnrecordedDaemonReuseFailsClosed(): Promise<void> {
-	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-orphan-daemon-"));
-	const socketDir = join(tempDir, "sockets");
+async function assertRealUpstreamRestoredDaemonReuseFailsClosed(): Promise<void> {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-restored-daemon-"));
+	const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "ru-"));
 	let sessionName: string | undefined;
 	try {
 		await initializeGitProject(tempDir);
@@ -156,19 +157,20 @@ async function assertRealUpstreamUnrecordedDaemonReuseFailsClosed(): Promise<voi
 			AGENT_BROWSER_CONFIG: undefined,
 			AGENT_BROWSER_ENCRYPTION_KEY: process.platform === "win32" ? "a".repeat(64) : undefined,
 			AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			HOME: tempDir,
 			USERPROFILE: tempDir,
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 		}, async () => {
 			const firstHarness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(firstHarness.handlers, "session_start", { reason: "new" }, firstHarness.ctx);
-			const opened = await executeRegisteredTool(firstHarness.tool, firstHarness.ctx, { args: ["open", "about:blank"] });
-			assert.equal(opened.isError, false, `orphan-daemon setup open failed: ${opened.content[0]?.text ?? ""}`);
+			const opened = await executeRegisteredTool(firstHarness.tool, firstHarness.ctx, { args: ["open", "about:blank"], sessionMode: "fresh" });
+			assert.equal(opened.isError, false, `restored-daemon setup open failed: ${opened.content[0]?.text ?? ""}`);
 			sessionName = typeof opened.details?.sessionName === "string" ? opened.details.sessionName : undefined;
 
-			const emptyTranscriptHarness = createExtensionHarness({ cwd: tempDir });
-			await runExtensionEvent(emptyTranscriptHarness.handlers, "session_start", { reason: "new" }, emptyTranscriptHarness.ctx);
-			const blocked = await executeRegisteredTool(emptyTranscriptHarness.tool, emptyTranscriptHarness.ctx, {
+			const restoredHarness = createExtensionHarness({ cwd: tempDir, branch: firstHarness.ctx.sessionManager.getBranch().slice() });
+			await runExtensionEvent(restoredHarness.handlers, "session_start", { reason: "resume" }, restoredHarness.ctx);
+			const blocked = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, {
 				args: ["--proxy", "http://127.0.0.1:8080", "open", "about:blank"],
 			});
 			assert.equal(blocked.isError, true);
@@ -176,19 +178,20 @@ async function assertRealUpstreamUnrecordedDaemonReuseFailsClosed(): Promise<voi
 			assert.equal(blocked.details?.exitCode, undefined);
 
 			const closed = await executeRegisteredTool(firstHarness.tool, firstHarness.ctx, { args: ["close"] });
-			assert.equal(closed.isError, false, `orphan-daemon cleanup close failed: ${closed.content[0]?.text ?? ""}`);
+			assert.equal(closed.isError, false, `restored-daemon cleanup close failed: ${closed.content[0]?.text ?? ""}`);
 			sessionName = undefined;
 		});
 	} finally {
-		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName });
+		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName, socketDir });
 		await rm(tempDir, { force: true, recursive: true });
+		await rm(socketDir, { force: true, recursive: true });
 	}
 }
 
 async function assertRealUpstreamRestoreStorageSymlinkFailsClosed(): Promise<void> {
 	if (process.platform === "win32") return;
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-symlink-"));
-	const socketDir = join(tempDir, "sockets");
+	const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "ru-"));
 	const targetDir = join(tempDir, "outside-state-target");
 	await initializeGitProject(tempDir);
 	await mkdir(join(tempDir, ".agent-browser"), { recursive: true, mode: 0o700 });
@@ -200,6 +203,7 @@ async function assertRealUpstreamRestoreStorageSymlinkFailsClosed(): Promise<voi
 			AGENT_BROWSER_CONFIG: undefined,
 			AGENT_BROWSER_ENCRYPTION_KEY: undefined,
 			AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			HOME: tempDir,
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 		}, async () => {
@@ -214,15 +218,16 @@ async function assertRealUpstreamRestoreStorageSymlinkFailsClosed(): Promise<voi
 		});
 		assert.deepEqual(await readdir(targetDir), [], "real upstream must not write restore state through the sessions symlink, including on close");
 	} finally {
-		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName });
+		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName, socketDir });
 		await rm(tempDir, { force: true, recursive: true });
+		await rm(socketDir, { force: true, recursive: true });
 	}
 }
 
 async function assertRealUpstreamNestedRestoreStorageSymlinkFailsClosed(): Promise<void> {
 	if (process.platform === "win32") return;
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-nested-symlink-"));
-	const socketDir = join(tempDir, "sockets");
+	const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "ru-"));
 	const outsideStateFile = join(tempDir, "outside-candidate.json");
 	const temporaryDirectory = join(tempDir, ".agent-browser", "sessions", ".tmp");
 	await initializeGitProject(tempDir);
@@ -235,6 +240,7 @@ async function assertRealUpstreamNestedRestoreStorageSymlinkFailsClosed(): Promi
 			AGENT_BROWSER_CONFIG: undefined,
 			AGENT_BROWSER_ENCRYPTION_KEY: undefined,
 			AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			HOME: tempDir,
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 		}, async () => {
@@ -249,15 +255,16 @@ async function assertRealUpstreamNestedRestoreStorageSymlinkFailsClosed(): Promi
 		});
 		assert.equal(await readFile(outsideStateFile, "utf8"), "unchanged");
 	} finally {
-		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName });
+		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName, socketDir });
 		await rm(tempDir, { force: true, recursive: true });
+		await rm(socketDir, { force: true, recursive: true });
 	}
 }
 
 async function assertRealUpstreamRelativeHomeFailsClosed(): Promise<void> {
 	if (process.platform === "win32") return;
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-relative-home-"));
-	const socketDir = join(tempDir, "sockets");
+	const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "ru-"));
 	let sessionName: string | undefined;
 	try {
 		await initializeGitProject(tempDir);
@@ -265,6 +272,7 @@ async function assertRealUpstreamRelativeHomeFailsClosed(): Promise<void> {
 			AGENT_BROWSER_CONFIG: undefined,
 			AGENT_BROWSER_ENCRYPTION_KEY: undefined,
 			AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			HOME: "relative-home",
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 		}, async () => {
@@ -279,8 +287,9 @@ async function assertRealUpstreamRelativeHomeFailsClosed(): Promise<void> {
 		});
 		await assert.rejects(readdir(join(tempDir, "relative-home", ".agent-browser")));
 	} finally {
-		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName });
+		await closeManagedSessionIfPresent({ cwd: tempDir, sessionName, socketDir });
 		await rm(tempDir, { force: true, recursive: true });
+		await rm(socketDir, { force: true, recursive: true });
 	}
 }
 
@@ -358,6 +367,72 @@ async function assertRealUpstreamLocalDaemonPassesThrough(): Promise<void> {
 	}
 }
 
+for (const reconstructed of [false, true]) test(`real upstream agent-browser contract suite matches owned read continuity (reconstructed=${reconstructed})`, { skip: !REAL_UPSTREAM_ENABLED, timeout: 60_000 }, async () => {
+	await assertInstalledAgentBrowserVersion();
+	const dir = await mkdtemp(join(tmpdir(), "or-"));
+	const socketDir = await mkdtemp(join(process.platform === "darwin" ? "/private/tmp" : tmpdir(), "or-"));
+	const fixture = await startAgentBrowserContractFixtureServer();
+	await initializeGitProject(dir);
+	try {
+		await withPatchedEnv({
+			...Object.fromEntries(Object.keys(process.env).filter(name => /^(?:PI_)?AGENT_BROWSER_/.test(name)).map(name => [name, undefined])),
+			HOME: dir, USERPROFILE: dir, PI_CODING_AGENT_DIR: join(dir, "pi"),
+			AGENT_BROWSER_ENCRYPTION_KEY: process.platform === "win32" ? "a".repeat(64) : undefined,
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir, AGENT_BROWSER_SOCKET_DIR: socketDir,
+		}, async () => {
+			const branch: unknown[] = [];
+			let harness = createExtensionHarness({ cwd: dir, branch });
+			let sessionName: string | undefined, restoreKey: string | undefined;
+			try {
+				await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
+				const url = `${fixture.baseUrl}/contract`, marker = "unsaved-owned-read";
+				const opened = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", url], sessionMode: "fresh" });
+				sessionName = opened.details?.sessionName as string;
+				assert.equal(opened.isError, false, opened.content[0]?.text);
+				branch.push(createToolBranchEntry({ details: opened.details!, isError: opened.isError }));
+				const prefix = ["--namespace", "", "--session", sessionName];
+				const marked = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["eval", "--stdin"], stdin: `(() => { window.__ownedContinuity = ${JSON.stringify(marker)}; document.querySelector('#name-input').value = window.__ownedContinuity; sessionStorage.setItem('ownedContinuity', window.__ownedContinuity); return true; })()` });
+				assert.equal(marked.isError, false, marked.content[0]?.text);
+				const before = await executeRegisteredTool(harness.tool, harness.ctx, { args: [...prefix, "session", "info"] });
+				assert.equal(before.isError, false, before.content[0]?.text);
+				const nativeBefore = before.details?.data as { pid: number; runtime: { restoreKey: string } };
+				assert.ok(nativeBefore.pid > 0);
+				restoreKey = nativeBefore.runtime.restoreKey;
+				assert.match(restoreKey, /^piab-r2-/);
+				if (reconstructed) {
+					await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "reload" }, harness.ctx);
+					harness = createExtensionHarness({ cwd: dir, branch });
+					await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
+					assert.equal(Number(await readFile(join(socketDir, `${sessionName}.pid`), "utf8")), nativeBefore.pid);
+				}
+				for (const args of [["read", url], ["batch", `read ${url}`], ["session", "info"]]) {
+					const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: [...prefix, ...args] });
+					assert.equal(result.isError, false, result.content[0]?.text);
+					const after = await executeRegisteredTool(harness.tool, harness.ctx, { args: [...prefix, "session", "info"] });
+					const nativeAfter = after.details?.data as { pid: number; runtime: { restoreKey: string } };
+					assert.equal(nativeAfter.pid, nativeBefore.pid, `${args[0]} must not replace the owned daemon`);
+					assert.equal(nativeAfter.runtime.restoreKey, restoreKey);
+					const current = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "url"] });
+					assert.equal(current.isError, false, current.content[0]?.text);
+					assert.equal(current.details?.sessionName, sessionName);
+					const state = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["eval", "--stdin"], stdin: "({ url: location.href, marker: window.__ownedContinuity, form: document.querySelector('#name-input').value, sessionMarker: sessionStorage.getItem('ownedContinuity') })" });
+					assert.equal(state.isError, false, state.content[0]?.text);
+					assert.deepEqual(getResultValue(state.details!, ["result"]), { url, marker, form: marker, sessionMarker: marker });
+				}
+			} finally {
+				await executeRegisteredTool(harness.tool, harness.ctx, { args: ["close"] });
+				await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
+				if (sessionName) {
+					const pid = Number(await readFileIfPresent(join(socketDir, `${sessionName}.pid`))) || undefined;
+					const closed = await runAgentBrowserProcess({ args: ["--json", "--namespace", "", "close", "--all"], cwd: dir, env: { AGENT_BROWSER_SOCKET_DIR: socketDir } });
+					assert.equal(closed.exitCode, 0, closed.stderr);
+					assert.equal(await waitForTestPidExit(pid, 10_000), true, "the private native daemon must exit");
+				}
+			}
+		});
+	} finally { await fixture.close(); await rm(dir, { recursive: true, force: true }); await rm(socketDir, { recursive: true, force: true }); }
+});
+
 test("real upstream agent-browser contract suite matches navigation availability and tab setup", { skip: !REAL_UPSTREAM_ENABLED, timeout: 60_000 }, async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "wm-"));
 	const socketDir = join(dir, "s");
@@ -382,7 +457,13 @@ test("real upstream agent-browser contract suite matches navigation availability
 				assert.equal((plain.details?.data as { webmcp?: unknown }).webmcp, undefined);
 				assert.doesNotMatch(plain.content[0]?.text ?? "", /WebMCP tools are available/);
 				const available = await call(["open", `${fixture.baseUrl}/webmcp`]);
-				assert.deepEqual((available.details?.data as { webmcp: unknown }).webmcp, { experimental: true, available: true, toolCount: 2 });
+				const catalog = (available.details?.data as { webmcp: { experimental: boolean; available: boolean; toolCount: number; status?: string; tools?: Array<{ name: string; inputSchema?: unknown }> } }).webmcp;
+				assert.deepEqual({ experimental: catalog.experimental, available: catalog.available, toolCount: catalog.toolCount }, { experimental: true, available: true, toolCount: 2 });
+				if (Number(version[1]) > 0 || Number(version[2]) >= 38) {
+					assert.equal(catalog.status, "ready");
+					assert.deepEqual(catalog.tools?.map((tool) => tool.name), ["set_message", "wait_for_cancel"]);
+					assert.ok(catalog.tools?.every((tool) => tool.inputSchema === undefined), "automatic discovery omits full schemas");
+				}
 				assert.match(available.content[0]?.text ?? "", /WebMCP tools are available.*webmcp list/);
 				for (const [headers, expected] of [[{ "x-fixture": "batch-fidelity" }, "present"], [{}, "missing"]] as const) {
 					await call(["set", "headers", JSON.stringify(headers)]);
@@ -400,6 +481,174 @@ test("real upstream agent-browser contract suite matches navigation availability
 	} finally { await fixture.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test("real upstream agent-browser contract suite matches QA non-pass after same-URL error-buffer rollover", { skip: !REAL_UPSTREAM_ENABLED, timeout: 90_000 }, async (t) => {
+	const version = await assertInstalledAgentBrowserVersion();
+	const dir = await mkdtemp(join(tmpdir(), "qr-"));
+	const socketDir = join(dir, "s");
+	const fixture = await startAgentBrowserContractFixtureServer();
+	const url = `${fixture.baseUrl}/qa-error-residue`;
+	try {
+		await withPatchedEnv({
+			...Object.fromEntries(Object.keys(process.env).filter((name) => /^(?:PI_)?AGENT_BROWSER_/.test(name)).map((name) => [name, undefined])),
+			HOME: dir, USERPROFILE: dir, PI_CODING_AGENT_DIR: join(dir, "pi"),
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir, AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: "0",
+		}, async () => {
+			const h = createExtensionHarness({ cwd: dir });
+			await runExtensionEvent(h.handlers, "session_start", { reason: "new" }, h.ctx);
+			const call = async (args: string[], outputPath?: string) => {
+				const result = await executeRegisteredTool(h.tool, h.ctx, { args, outputPath });
+				assert.equal(result.isError, false, result.content[0]?.text);
+				return result;
+			};
+			const readErrors = async (name: string) => {
+				const path = join(dir, name);
+				await call(["errors"], path);
+				return JSON.parse(await readFile(path, "utf8")) as { errors: unknown[] };
+			};
+			try {
+				const clean = await executeRegisteredTool(h.tool, h.ctx, { qa: { url: `${fixture.baseUrl}/contract`, expectedText: "Agent Browser Contract Fixture" } });
+				assert.equal(clean.isError, false, clean.content[0]?.text);
+				assert.equal((clean.details?.qaPreset as { passed: boolean }).passed, true);
+
+				await call(["open", url]);
+				await call(["wait", "--fn", "window.qaErrorsThrown === 1100"]);
+				const before = await readErrors("before.json");
+				assert.equal(before.errors.length, 1000, "the native FIFO must be saturated");
+				assert.equal(new Set(before.errors.map((row) => JSON.stringify(row))).size, 1, "all native error rows must match");
+				await call(["eval", "sessionStorage.setItem('qa-error-count', '1')"]);
+				const repeated = await executeRegisteredTool(h.tool, h.ctx, { qa: { url, expectedText: "Repeated error fixture", checkConsole: false, checkNetwork: false } });
+				const counter = getResultValue((await call(["eval", "window.qaErrorsThrown"])).details!, ["result"]);
+				assert.equal(counter, 1, "the new document must actually throw again at the same URL");
+				const after = await readErrors("after.json");
+				const identicalRows = JSON.stringify(after.errors) === JSON.stringify(before.errors);
+				const analysis = repeated.details?.qaPreset as { passed: boolean; failedChecks: string[] };
+				t.diagnostic(JSON.stringify({ version, url, before: before.errors.length, after: after.errors.length, identicalRows, counter, qa: analysis, isError: repeated.isError }));
+				assert.equal(analysis.passed, false, "a newly thrown page error must never yield a QA pass, even when FIFO rollover hides it");
+				assert.equal(repeated.isError, true);
+				assert.equal(repeated.details?.resultCategory, "failure");
+				assert.equal(repeated.details?.failureCategory, "qa-failure");
+				assert.ok(analysis.failedChecks.some((check) => /page.error/.test(check)));
+				if (identicalRows) {
+					assert.match(analysis.failedChecks.join("\n"), /page-error check could not be verified/);
+					assert.doesNotMatch(analysis.failedChecks.join("\n"), /\d+ page error\(s\)/);
+				}
+				assert.doesNotMatch(repeated.content[0]?.text ?? "", /QA preset passed|ignored as unchanged|Only unchanged residue/);
+			} finally {
+				await call(["close"]);
+				await runExtensionEvent(h.handlers, "session_shutdown", { reason: "quit" }, h.ctx);
+			}
+		});
+	} finally {
+		await fixture.close();
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("real upstream agent-browser contract suite matches reported browser regressions", { skip: !REAL_UPSTREAM_ENABLED, timeout: 60_000 }, async (t) => {
+	await assertInstalledAgentBrowserVersion();
+	const dir = await mkdtemp(join(tmpdir(), "br-"));
+	const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "br-"));
+	const fixture = await startAgentBrowserContractFixtureServer();
+	try {
+		await withPatchedEnv({
+			...Object.fromEntries(Object.keys(process.env).filter(name => /^(?:PI_)?AGENT_BROWSER_/.test(name)).map(name => [name, undefined])),
+			HOME: dir, USERPROFILE: dir, PI_CODING_AGENT_DIR: join(dir, "pi"),
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir, AGENT_BROWSER_SOCKET_DIR: socketDir,
+			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: "0",
+		}, async () => {
+			const h = createExtensionHarness({ cwd: dir });
+			const call = async (params: unknown) => {
+				const result = await executeRegisteredTool(h.tool, h.ctx, params);
+				assert.equal(result.isError, false, result.content[0]?.text);
+				return result;
+			};
+			try {
+				const opened = await call({ args: ["open", `${fixture.baseUrl}/browser-regressions`], sessionMode: "fresh" });
+				const sessionName = String(opened.details?.sessionName);
+				await call({ args: ["wait", "--fn", "document.body.dataset.ready === 'yes'"] });
+				await t.test("filtered network details and exports redact the same credentials as ordinary results", async () => {
+					const ordinary = await call({ args: ["network", "requests"] });
+					assert.doesNotMatch(JSON.stringify(ordinary), /fixture-url-secret|fixture-header-secret/);
+					const outputPath = join(dir, "network.json");
+					const filtered = await call({ args: ["network", "requests", "--current-page"], outputPath });
+					assert.match(JSON.stringify(filtered.details?.data), /browser-regression-api/, "the credential-bearing request must actually be present");
+					assert.doesNotMatch(JSON.stringify(filtered), /fixture-url-secret|fixture-header-secret/);
+					assert.doesNotMatch(await readFile(outputPath, "utf8"), /fixture-url-secret|fixture-header-secret/);
+				});
+				await t.test("download runs the export handler and saves its generated CSV", async () => {
+					const path = join(dir, "report.csv");
+					const result = await call({ args: ["download", "#export", path] });
+					assert.equal(await readFile(path, "utf8"), "name,total\nAlice,42\n");
+					assert.equal((result.details?.artifactVerification as { verified: boolean }).verified, true);
+					assert.equal(getResultValue((await call({ args: ["eval", "window.exportClicks || 0"] })).details!, ["result"]), 1);
+					for (const selector of ["#static-download", "#redirect-download"]) {
+						const savedPath = join(dir, `${selector.slice(1)}.txt`);
+						await call({ args: ["download", selector, savedPath] });
+						assert.equal(await readFile(savedPath, "utf8"), DOWNLOAD_FIXTURE_CONTENT);
+					}
+				});
+				await t.test("accessible-name collisions cannot turn a trusted ref click into a failure", async () => {
+					const snapshot = await call({ args: ["snapshot", "-i"] });
+					const refSnapshot = snapshot.details?.refSnapshot as import("../extensions/agent-browser/lib/session-page-state.js").SessionRefSnapshot;
+					const ref = Object.entries(refSnapshot.refs!).find(([, value]) => value.role === "button" && value.name === "Save")?.[0];
+					assert.ok(ref);
+					const clicked = await call({ args: ["click", `@${ref}`] });
+					assert.equal(clicked.details?.clickDispatch, undefined);
+					assert.doesNotMatch(JSON.stringify(clicked.details?.nextActions), /retry-click-after-dispatch-miss/);
+					const state = await call({ args: ["eval", "--stdin"], stdin: "({save:Number(document.querySelector('#save').dataset.clicks||0),copy:Number(document.querySelector('#copy').dataset.clicks||0),trusted:document.querySelector('#save').dataset.trusted})" });
+					assert.deepEqual(getResultValue(state.details!, ["result"]), { save: 1, copy: 0, trusted: "true" });
+					const observe = Object.entries(refSnapshot.refs!).find(([, value]) => value.name === "Observe")?.[0];
+					assert.ok(observe);
+					await withOwnedManagedSessionContext({ cwd: dir, sessionName, restoreState: new ManagedSessionRestoreState() }, async () => {
+						const options = { commandTokens: ["click", `@${observe}`], cwd: dir, sessionName, refSnapshot };
+						const probe = await prepareClickDispatchProbe(options);
+						assert.ok(probe, "correctly identified ref targets must retain no-dispatch detection");
+						assert.equal((await collectClickDispatchDiagnostic({ ...options, probe }))?.status, "no-native-event-observed");
+					});
+				});
+				await t.test("XPath probes cannot mistake a main-frame element for the selected child frame", async () => {
+					await call({ args: ["frame", "#child-frame"] });
+					try {
+						await call({ args: ["click", "xpath=//*[@id='frame-button']"] });
+						const status = await call({ args: ["get", "text", "#frame-status"] });
+						assert.equal(getResultValue(status.details!, ["text"]), "Frame clicked");
+					} finally { await call({ args: ["frame", "main"] }); }
+					const residue = await call({ args: ["eval", "--stdin"], stdin: "({ markers: Object.keys(window).filter(key => key.startsWith('__piAgentBrowserClickDispatchProbe_')), attributes: [...document.querySelectorAll('*')].flatMap(el => el.getAttributeNames()).filter(name => name.startsWith('data-pi-click-dispatch-')) })" });
+					assert.deepEqual(getResultValue(residue.details!, ["result"]), { markers: [], attributes: [] });
+				});
+				await t.test("smooth-scroll containers report success after moving", async () => {
+					await call({ args: ["scroll", "#panel", "down", "300"] });
+					const position = await call({ args: ["eval", "document.querySelector('#panel').scrollTop"] });
+					assert.equal(getResultValue(position.details!, ["result"]), 300);
+				});
+				await t.test("wrapper-filtered snapshots preserve explicit JSON and complete refs", async () => {
+					const control = await call({ args: ["--json", "snapshot", "-i"] });
+					assert.equal(JSON.parse(control.content[0]?.text ?? "").success, true);
+					const result = await call({ args: ["--json", "snapshot", "-i", "--filter", "role=button"] });
+					const envelope = JSON.parse(result.content[0]?.text ?? "");
+					assert.equal(envelope.success, true);
+					const { lifecycle, ...visibleData } = result.details?.data as Record<string, unknown>;
+					assert.ok(lifecycle, "native lifecycle remains in audit details");
+					assert.deepEqual(envelope.data, visibleData);
+					assert.ok(Object.values(envelope.data.refs).every((ref) => (ref as { role: string }).role === "button"));
+					assert.ok(Object.values((result.details?.refSnapshot as { refs: Record<string, { role: string }> }).refs).some(ref => ref.role === "link"));
+					const failure = await executeRegisteredTool(h.tool, h.ctx, { args: ["--json", "scroll", "#missing-panel", "down", "300"] });
+					assert.equal(failure.isError, true);
+					assert.equal(JSON.parse(failure.content[0]?.text ?? "").success, false);
+				});
+			} finally {
+				await call({ args: ["close"] });
+				await runExtensionEvent(h.handlers, "session_shutdown", { reason: "quit" }, h.ctx);
+			}
+		});
+	} finally {
+		await fixture.close();
+		await rm(dir, { recursive: true, force: true });
+		await rm(socketDir, { recursive: true, force: true });
+	}
+});
+
 test("real upstream agent-browser contract suite matches duplicate-name click mutation", {
 	skip: REAL_UPSTREAM_ENABLED ? false : REAL_UPSTREAM_SKIP_REASON,
 	timeout: 60_000,
@@ -413,7 +662,7 @@ test("real upstream agent-browser contract suite matches duplicate-name click mu
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			try {
-				const opened = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", `${fixture.baseUrl}/duplicate-buttons`] });
+				const opened = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", `${fixture.baseUrl}/duplicate-buttons`], sessionMode: "fresh" });
 				assert.equal(opened.isError, false, opened.content[0]?.text);
 				const sessionName = opened.details?.sessionName as string;
 				const snapshot = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["snapshot", "-i"] });
@@ -425,33 +674,35 @@ test("real upstream agent-browser contract suite matches duplicate-name click mu
 				assert.equal(first.isError, false, first.content[0]?.text);
 				assert.equal((first.details?.pageChangeSummary as { observed?: boolean }).observed, false, "native dispatch alone must not claim application-state proof");
 
-				// The first button is now Remove: its old name's ordinal points at the untouched second button.
-				const probe = await prepareClickDispatchProbe({ commandTokens: ["click", `@${duplicates[0][0]}`], cwd: tempDir, refSnapshot, sessionName });
-				const nativeClick = await runAgentBrowserProcess({ args: ["--json", "--session", sessionName, "click", "xpath=//*[@id='first']"], cwd: tempDir });
-				assert.equal(nativeClick.exitCode, 0, nativeClick.stderr);
-				assert.equal(JSON.parse(nativeClick.stdout).success, true);
-				const diagnostic = await collectClickDispatchDiagnostic({ cwd: tempDir, probe, sessionName });
-				const state = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["eval", "--stdin"], stdin: "Array.from(document.querySelectorAll('button'), b => ({ id: b.id, text: b.textContent, clicks: Number(b.dataset.clicks || 0), trusted: b.dataset.trusted === 'true' }))" });
-				assert.equal(state.isError, false, state.content[0]?.text);
-				const buttons = getResultValue(state.details!, ["result"]);
-				assert.deepEqual(buttons, [
-					{ id: "first", text: "Remove", clicks: 2, trusted: true },
-					{ id: "second", text: "Add to cart", clicks: 0, trusted: false },
-				]);
-				t.diagnostic(JSON.stringify({ buttons, clickDispatch: diagnostic }));
-				assert.equal(diagnostic, undefined, "a stale duplicate ordinal must not contradict the native target's trusted clicks");
+				await withOwnedManagedSessionContext({ cwd: tempDir, sessionName, restoreState: new ManagedSessionRestoreState() }, async () => {
+					// The first button is now Remove: its old name's ordinal points at the untouched second button.
+					const probe = await prepareClickDispatchProbe({ commandTokens: ["click", `@${duplicates[0][0]}`], cwd: tempDir, refSnapshot, sessionName });
+					const nativeClick = await runAgentBrowserProcess({ args: ["--json", "--session", sessionName, "click", "xpath=//*[@id='first']"], cwd: tempDir });
+					assert.equal(nativeClick.exitCode, 0, nativeClick.stderr);
+					assert.equal(JSON.parse(nativeClick.stdout).success, true);
+					const diagnostic = await collectClickDispatchDiagnostic({ cwd: tempDir, probe, sessionName });
+					const state = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["eval", "--stdin"], stdin: "Array.from(document.querySelectorAll('button'), b => ({ id: b.id, text: b.textContent, clicks: Number(b.dataset.clicks || 0), trusted: b.dataset.trusted === 'true' }))" });
+					assert.equal(state.isError, false, state.content[0]?.text);
+					const buttons = getResultValue(state.details!, ["result"]);
+					assert.deepEqual(buttons, [
+						{ id: "first", text: "Remove", clicks: 2, trusted: true },
+						{ id: "second", text: "Add to cart", clicks: 0, trusted: false },
+					]);
+					t.diagnostic(JSON.stringify({ buttons, clickDispatch: diagnostic }));
+					assert.equal(diagnostic, undefined, "a stale duplicate ordinal must not contradict the native target's trusted clicks");
 
-				const probeOptions = { commandTokens: ["click", "xpath=//*[@id='second']"], cwd: tempDir, sessionName };
-				const missedProbe = await prepareClickDispatchProbe(probeOptions);
-				assert.ok(missedProbe, "an exact XPath target must still be probed");
-				const miss = await collectClickDispatchDiagnostic({ ...probeOptions, probe: missedProbe });
-				assert.equal(miss?.status, "no-native-event-observed", "no click must remain a real dispatch miss");
-				const hitProbe = await prepareClickDispatchProbe(probeOptions);
-				assert.ok(hitProbe);
-				const hit = await runAgentBrowserProcess({ args: ["--json", "--session", sessionName, ...probeOptions.commandTokens], cwd: tempDir });
-				assert.equal(hit.exitCode, 0, hit.stderr);
-				assert.equal(JSON.parse(hit.stdout).success, true);
-				assert.equal(await collectClickDispatchDiagnostic({ ...probeOptions, probe: hitProbe }), undefined, "a trusted native click must not report a miss");
+					const probeOptions = { commandTokens: ["click", "xpath=//*[@id='second']"], cwd: tempDir, sessionName };
+					const missedProbe = await prepareClickDispatchProbe(probeOptions);
+					assert.ok(missedProbe, "an exact XPath target must still be probed");
+					const miss = await collectClickDispatchDiagnostic({ ...probeOptions, probe: missedProbe });
+					assert.equal(miss?.status, "no-native-event-observed", "no click must remain a real dispatch miss");
+					const hitProbe = await prepareClickDispatchProbe(probeOptions);
+					assert.ok(hitProbe);
+					const hit = await runAgentBrowserProcess({ args: ["--json", "--session", sessionName, ...probeOptions.commandTokens], cwd: tempDir });
+					assert.equal(hit.exitCode, 0, hit.stderr);
+					assert.equal(JSON.parse(hit.stdout).success, true);
+					assert.equal(await collectClickDispatchDiagnostic({ ...probeOptions, probe: hitProbe }), undefined, "a trusted native click must not report a miss");
+				});
 			} finally {
 				await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 			}
@@ -491,13 +742,12 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 					const branch: unknown[] = [];
 					let harness = createExtensionHarness({ branch, cwd, sessionFile });
 					let sessionName: string | undefined;
-					const native = async (args: string[]) => {
+					const observe = async (args: string[]) => {
 						assert.ok(sessionName);
-						const result = await runAgentBrowserProcess({ args: ["--json", "--namespace", "", "--session", sessionName, ...args], cwd });
-						assert.equal(result.exitCode, 0, result.stderr);
-						const envelope = JSON.parse(result.stdout);
-						assert.equal(envelope.success, true);
-						return envelope.data;
+						const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--namespace", "", "--session", sessionName, ...args] });
+						assert.equal(result.details?.exitCode, 0, result.content[0]?.text);
+						assert.equal(result.isError, false, result.content[0]?.text);
+						return result.details?.data as { active?: boolean; pid?: number; url?: string; runtime?: { restoreStatus?: string } };
 					};
 					const run = async (params: Parameters<typeof executeRegisteredTool>[2]) => {
 						const result = await executeRegisteredTool(harness.tool, harness.ctx, params);
@@ -506,7 +756,7 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 					};
 					try {
 						await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-						const opened = await run({ args: ["open", url] });
+						const opened = await run({ args: ["open", url], sessionMode: "fresh" });
 						sessionName = opened.details?.sessionName as string | undefined;
 						assert.equal(opened.isError, false, opened.content[0]?.text);
 						assert.equal(opened.details?.managedSessionRestoreDisabled, undefined);
@@ -520,19 +770,19 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 						assert.match(JSON.stringify(before.details?.refSnapshot), /Unsaved control/);
 						const framed = await run({ args: ["frame", "#contract-frame"] });
 						assert.equal(framed.isError, false, framed.content[0]?.text);
-						const oldDaemon = await native(["session", "info"]);
+						const oldDaemon = await observe(["session", "info"]);
 						assert.equal(typeof oldDaemon.pid, "number");
 						await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 						assert.equal(await waitForTestPidExit(oldDaemon.pid, 10_000), true, "old owned daemon must exit before the first resumed read");
-						assert.equal((await native(["session", "info"])).active, false);
+						assert.equal((await observe(["session", "info"])).active, false);
 						await writeFile(sessionFile, JSON.stringify(branch));
 						harness = createExtensionHarness({ branch: JSON.parse(await readFile(sessionFile, "utf8")), cwd, sessionFile });
 						await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 
 						// No explicit open after quit: the first requested operation must read the remembered page.
 						const snapshot = await run({ args: ["snapshot", "-i"] });
-						const observed = await native(["get", "url"]);
-						const newDaemon = await native(["session", "info"]);
+						const observed = await observe(["get", "url"]);
+						const newDaemon = await observe(["session", "info"]);
 						t.diagnostic(JSON.stringify({ storage, sessionName, oldPid: oldDaemon.pid, oldDaemonExited: true, newPid: newDaemon.pid, restoreStatus: newDaemon.runtime?.restoreStatus, requestedUrl: url, observedUrl: observed.url, resultCategory: snapshot.details?.resultCategory, failureCategory: snapshot.details?.failureCategory }));
 						assert.equal(snapshot.isError, false, snapshot.content[0]?.text);
 						assert.equal(snapshot.details?.resultCategory, "success");
@@ -540,7 +790,7 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 						assert.equal(observed.url, url);
 						assert.equal((snapshot.details?.data as { origin?: string }).origin, url);
 						assert.equal((snapshot.details?.sessionTabTarget as { url?: string }).url, url);
-						assert.equal(newDaemon.runtime.restoreStatus, "loaded");
+						assert.equal(newDaemon.runtime?.restoreStatus, "loaded");
 						assert.notEqual(newDaemon.pid, oldDaemon.pid);
 						assert.equal(snapshot.details?.refSnapshotInvalidation, undefined);
 						assert.match(JSON.stringify(snapshot.details?.refSnapshot), /"name":"Name"/);
@@ -550,10 +800,10 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 						assert.deepEqual(JSON.parse(String(getResultValue(state.details!, ["result"]))), { local: storage ? "kept" : null, session: storage ? "kept" : null, form: "", memory: "undefined" });
 					} finally {
 						if (sessionName) {
-							const daemon = await native(["session", "info"]);
+							const daemon = await observe(["session", "info"]);
 							await runExtensionEvent(harness.handlers, "session_shutdown", { reason: "quit" }, harness.ctx);
 							assert.equal(await waitForTestPidExit(daemon.pid, 10_000), true, "final owned daemon must exit");
-							assert.equal((await native(["session", "info"])).active, false);
+							assert.equal((await observe(["session", "info"])).active, false);
 							t.diagnostic(JSON.stringify({ sessionName, cleanup: "closed", daemonExited: true }));
 						}
 					}
@@ -566,6 +816,92 @@ test("real upstream agent-browser contract suite matches cold URL reopen after q
 	}
 });
 
+test("real upstream agent-browser contract suite matches 0.38 observation and recording options", { skip: !REAL_UPSTREAM_ENABLED, timeout: 120_000 }, async (t) => {
+	const version = await assertInstalledAgentBrowserVersion();
+	const [major, minor] = version.split(".").map(Number);
+	if (major === 0 && minor < 38) { t.skip("Observation options require upstream 0.38+"); return; }
+	const dir = await mkdtemp(join(tmpdir(), "piab-038-"));
+	const socketDir = join(dir, "s");
+	await mkdir(socketDir, { mode: 0o700 });
+	const fixture = await startAgentBrowserContractFixtureServer();
+	const session = `rebaseline-${process.pid}`;
+	try {
+		await withPatchedEnv({ HOME: dir, USERPROFILE: dir, PI_CODING_AGENT_DIR: join(dir, "pi"), PI_AGENT_BROWSER_SOCKET_DIR: socketDir, AGENT_BROWSER_SOCKET_DIR: socketDir, AGENT_BROWSER_CONFIG: undefined, AGENT_BROWSER_NAMESPACE: undefined, AGENT_BROWSER_PROFILE: undefined, AGENT_BROWSER_RESTORE: undefined, AGENT_BROWSER_CDP: undefined, AGENT_BROWSER_AUTO_CONNECT: undefined }, async () => {
+			const h = createExtensionHarness({ cwd: dir });
+			await runExtensionEvent(h.handlers, "session_start", { reason: "new" }, h.ctx);
+			const call = async (args: string[], stdin?: string) => {
+				const result = await executeRegisteredTool(h.tool, h.ctx, { args: ["--session", session, ...args], stdin });
+				assert.equal(result.isError, false, `${args.join(" ")}: ${result.content[0]?.text}`);
+				return result;
+			};
+			const snapshotOf = (result: Awaited<ReturnType<typeof call>>) => getResultValue(result.details ?? {}, ["snapshot"]) as { kind: string; refs: Record<string, { name: string }>; changes: unknown[] };
+			try {
+				await call(["open", `${fixture.baseUrl}/contract`]);
+				const full = await call(["snapshot", "-i", "--delta"]);
+				assert.equal(snapshotOf(full).kind, "full");
+				const ref = Object.entries(snapshotOf(full).refs).find(([, value]) => value.name === "Mark ready")?.[0];
+				assert.ok(ref);
+				const unchanged = await call(["snapshot", "-i", "--delta"]);
+				assert.equal(snapshotOf(unchanged).kind, "unchanged");
+				assert.ok((unchanged.details?.refSnapshot as { refIds: string[] }).refIds.includes(ref));
+				await call(["--input-mode", "smooth", "click", `@${ref}`, "--human"]);
+				assert.equal(getResultValue((await call(["get", "text", "#status"])).details ?? {}, ["text"]), "Clicked");
+				const fresh = await call(["snapshot", "-i", "--delta", "--full"]);
+				assert.equal(snapshotOf(fresh).kind, "full");
+				assert.ok(Object.hasOwn(snapshotOf(fresh).refs, ref), "same DOM node keeps its ref");
+				const batched = await call(["batch", "--bail"], JSON.stringify([["snapshot", "-i", "--delta"], ["get", "url"]]));
+				assert.ok((batched.details?.refSnapshot as { refIds: string[] }).refIds.includes(ref));
+				await call(["get", "text", `@${ref}`]);
+				const filtered = await call(["snapshot", "-i", "--delta", "--search", "Mark ready"]);
+				assert.match(filtered.content[0]?.text ?? "", /Mark ready/);
+
+				await call(["eval", "--stdin"], "for (let i = 0; i < 80; i++) { const b = document.createElement('button'); b.textContent = 'Observation control ' + i; document.body.append(b); }");
+				await call(["snapshot", "-i", "--delta", "--full"]);
+				await call(["eval", "--stdin"], "document.getElementById('mark-ready').textContent = 'Ready again'");
+				const delta = await call(["snapshot", "-i", "--delta"]);
+				assert.equal(snapshotOf(delta).kind, "delta");
+				assert.match(JSON.stringify(snapshotOf(delta).changes), /Ready again/);
+				assert.ok((delta.details?.refSnapshot as { refIds: string[] }).refIds.includes(ref));
+				await call(["get", "text", `@${ref}`]);
+
+				await call(["screenshot", "--if-changed", "shots/first.png"]);
+				const suppressed = await call(["screenshot", "--threshold", "0", "shots/absent.png"]);
+				assert.equal(getResultValue(suppressed.details ?? {}, ["changed"]), false);
+				assert.equal((suppressed.details?.data as { path?: string }).path, undefined);
+				assert.equal(suppressed.content.some((item) => item.type === "image"), false);
+				await assert.rejects(readFile(join(dir, "shots/absent.png")), { code: "ENOENT" });
+				const raw = await call(["batch", "screenshot --if-changed shots/raw-absent.png"]);
+				assert.equal((raw.details?.data as Array<{ result: { changed: boolean } }>)[0].result.changed, false);
+				assert.equal((raw.details?.artifacts as unknown[])?.length ?? 0, 0);
+				await assert.rejects(readFile(join(dir, "shots/raw-absent.png")), { code: "ENOENT" });
+
+				await call(["auth", "save", "fixture", "--url", `${fixture.baseUrl}/contract`, "--username", "demo", "--password", "fixture-only"]);
+				await call(["eval", "--stdin"], "document.body.insertAdjacentHTML('beforeend', '<input id=login-user><input id=login-pass type=password><button id=login-submit type=button>Log in</button>'); document.querySelector('#login-submit').onclick = () => { document.body.dataset.loggedIn = document.querySelector('#login-user').value + ':' + document.querySelector('#login-pass').value; }");
+				await call(["auth", "login", "fixture", "--no-navigate", "--username-selector", "#login-user", "--password-selector", "#login-pass", "--submit-selector", "#login-submit"]);
+				assert.equal(getResultValue((await call(["eval", "--stdin"], "document.body.dataset.loggedIn")).details ?? {}, ["result"]), "demo:fixture-only");
+
+				const collision = await executeRegisteredTool(h.tool, h.ctx, { args: ["--session", session, "batch"], stdin: '[["record","start","collision.webm","--contact-sheet"],["screenshot","collision.contact-sheet.png"]]' });
+				assert.equal(collision.isError, true);
+				assert.match(collision.content[0]?.text ?? "", /already written by step/);
+				await call(["record", "start", "capture.webm", "--cursor", "--contact-sheet-threshold", "0.01"]);
+				const reserved = await executeRegisteredTool(h.tool, h.ctx, { args: ["--session", session, "screenshot", "capture.contact-sheet.png"] });
+				assert.equal(reserved.isError, true);
+				assert.match(reserved.content[0]?.text ?? "", /reserved by an active recording/);
+				await call(["mouse", "move", "200", "250", "--duration", "250", "--steps", "12", "--human", "--seed", "42"]);
+				await call(["eval", "--stdin"], "document.body.style.background = 'lightblue'");
+				await call(["wait", "1500"]);
+				const stopped = await call(["record", "stop"]);
+				const sheet = (stopped.details?.artifacts as Array<{ kind: string; path: string; status: string }>).find((artifact) => artifact.kind === "image");
+				assert.ok(sheet);
+				assert.equal(sheet.status, "saved");
+				assert.equal((await readFile(join(dir, "capture.contact-sheet.png"))).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+				assert.ok((await readFile(join(dir, "capture.webm"))).length > 0);
+				assert.equal(stopped.content.some((item) => item.type === "image"), true);
+			} finally { await closeManagedSessionIfPresent({ cwd: dir, sessionName: session, socketDir }); }
+		});
+	} finally { await fixture.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 if (!REAL_UPSTREAM_ENABLED) {
 	test("real upstream agent-browser contract suite is opt-in", { skip: REAL_UPSTREAM_SKIP_REASON }, () => undefined);
 	test("real upstream agent-browser plugin list probe is opt-in", { skip: REAL_UPSTREAM_SKIP_REASON }, () => undefined);
@@ -576,7 +912,7 @@ if (!REAL_UPSTREAM_ENABLED) {
 		assert.equal(shapes.targetVersion, CAPABILITY_BASELINE.targetVersion, "output-shape fixture must track the canonical target version");
 
 		const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-real-upstream-"));
-		const socketDir = join(tempDir, "sockets");
+		const socketDir = await mkdtemp(join(dirname(getAgentBrowserSocketDir() ?? join(tmpdir(), "piab")), "ru-"));
 		const downloadDir = join(tempDir, "Downloads");
 		await initializeGitProject(tempDir);
 		await mkdir(downloadDir, { recursive: true });
@@ -588,6 +924,7 @@ if (!REAL_UPSTREAM_ENABLED) {
 				{
 					AGENT_BROWSER_DOWNLOAD_PATH: downloadDir,
 					AGENT_BROWSER_SOCKET_DIR: socketDir,
+					PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 					AGENT_BROWSER_SCREENSHOT_DIR: join(tempDir, "screenshots"),
 					HOME: tempDir,
 				},
@@ -751,21 +1088,33 @@ if (!REAL_UPSTREAM_ENABLED) {
 						await runCoreCommand(harness, ["open", contractUrl], shapes.commands.open, managedSessionName, "restore contract fixture after WebMCP");
 					}
 
+					await runCoreCommand(harness, ["fill", "#name-input", "read preserves this page"], shapes.commands.coreCommand, managedSessionName);
 					const readOutputPath = join(tempDir, "read-output.json");
-					const readResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["read", contractUrl], outputPath: readOutputPath });
+					const readResult = await withPatchedEnv({ AGENT_BROWSER_SESSION: undefined, AGENT_BROWSER_NAMESPACE: undefined, PI_AGENT_BROWSER_SOCKET_DIR: undefined }, async () => {
+						try {
+							return await executeRegisteredTool(harness.tool, harness.ctx, { args: ["read", contractUrl], outputPath: readOutputPath });
+						} finally {
+							// Legacy native URL reads may leave a browserless default daemon in this isolated socket directory.
+							await closeManagedSessionIfPresent({ cwd: tempDir, sessionName: "default", socketDir });
+						}
+					});
 					const readDetails = assertSuccessfulResult(readResult, shapes.commands.read, "read URL");
-					assert.equal(readDetails.sessionName, managedSessionName);
-					assert.equal(readDetails.usedImplicitSession, true);
+					assert.equal(readDetails.sessionName, undefined);
+					assert.equal(readDetails.usedImplicitSession, undefined);
 					assert.equal(readDetails.agentBrowserStarted, true);
-					assert.deepEqual(readDetails.lifecycle, { effectiveLaunch: { browserLaunched: true } });
+					const nativeReadLaunch = (readDetails.data as { lifecycle?: { effectiveLaunch?: { browserLaunched?: boolean } } }).lifecycle?.effectiveLaunch?.browserLaunched;
+					assert.deepEqual(readDetails.lifecycle, typeof nativeReadLaunch === "boolean" ? { effectiveLaunch: { browserLaunched: nativeReadLaunch } } : undefined, "forward native launch evidence without inventing it for HTTP reads");
 					assert.equal(readDetails.readSource, (readDetails.data as { source?: string }).source);
-					assert.equal((readDetails.managedSessionOutcome as { activeAfter?: boolean }).activeAfter, true);
+					assert.equal(readDetails.managedSessionOutcome, undefined);
 					assert.equal((readDetails.outputFile as { status?: string }).status, "saved");
 					assert.match(readResult.content[0]?.text ?? "", /Agent Browser Contract Fixture/);
 					assert.match((readDetails.data as { content?: string }).content ?? "", /Ready for real upstream contract validation/);
 					const savedRead = JSON.parse(await readFile(readOutputPath, "utf8")) as { content?: string; source?: string };
 					assert.match(savedRead.content ?? "", /Ready for real upstream contract validation/);
 					assert.equal(savedRead.source, readDetails.readSource);
+					const ownedPageAfterRead = await runCoreCommand(harness, ["get", "url"], shapes.commands.coreSubcommand, managedSessionName);
+					assert.equal(getResultValue(ownedPageAfterRead, ["url", "result"]), contractUrl);
+					assert.equal(getResultValue(await runCoreCommand(harness, ["get", "value", "#name-input"], shapes.commands.coreSubcommand, managedSessionName), ["value"]), "read preserves this page");
 
 					const uploadPath = join(tempDir, "upload-fixture.txt");
 					const screenshotPath = join(tempDir, "contract.png");
@@ -832,10 +1181,10 @@ if (!REAL_UPSTREAM_ENABLED) {
 						getResultValue(await runCoreCommand(harness, ["get", "value", "#flavor-select"], shapes.commands.coreSubcommand, managedSessionName), ["value"]),
 						"vanilla",
 					);
-					const jobSelect = await executeRegisteredTool(harness.tool, harness.ctx, {
-						job: { steps: [{ action: "select", selector: "#flavor-select", value: "chocolate" }] },
+					const batchSelect = await executeRegisteredTool(harness.tool, harness.ctx, {
+						args: ["batch", "--bail"], stdin: JSON.stringify([["select", "#flavor-select", "chocolate"]]),
 					});
-					assertCoreCommandResult(jobSelect, shapes.commands.batch, "job select", managedSessionName);
+					assertCoreCommandResult(batchSelect, shapes.commands.batch, "batch select", managedSessionName);
 					assert.equal(
 						getResultValue(await runCoreCommand(harness, ["get", "value", "#flavor-select"], shapes.commands.coreSubcommand, managedSessionName), ["value"]),
 						"chocolate",
@@ -1076,7 +1425,7 @@ if (!REAL_UPSTREAM_ENABLED) {
 					await runExtensionEvent(restoredHarness.handlers, "session_start", { reason: "resume" }, restoredHarness.ctx);
 					let restoredValueText: string | undefined;
 					try {
-						const restoredOpen = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, { args: ["open", contractUrl] });
+						const restoredOpen = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, { args: ["open", contractUrl], sessionMode: "fresh" });
 						assertSuccessfulResult(restoredOpen, shapes.commands.open, "open restored managed session");
 						const readRestoreState = await executeRegisteredTool(restoredHarness.tool, restoredHarness.ctx, {
 							args: ["eval", "--stdin"],
@@ -1097,7 +1446,7 @@ if (!REAL_UPSTREAM_ENABLED) {
 					await runExtensionEvent(isolatedHarness.handlers, "session_start", { reason: "new" }, isolatedHarness.ctx);
 					let isolatedValueText: string | undefined;
 					try {
-						const isolatedOpen = await executeRegisteredTool(isolatedHarness.tool, isolatedHarness.ctx, { args: ["open", contractUrl] });
+						const isolatedOpen = await executeRegisteredTool(isolatedHarness.tool, isolatedHarness.ctx, { args: ["open", contractUrl], sessionMode: "fresh" });
 						assertSuccessfulResult(isolatedOpen, shapes.commands.open, "open distinct-transcript managed session");
 						const isolatedState = await executeRegisteredTool(isolatedHarness.tool, isolatedHarness.ctx, {
 							args: ["eval", "--stdin"],
@@ -1159,12 +1508,13 @@ if (!REAL_UPSTREAM_ENABLED) {
 				},
 			);
 		} finally {
-			await closeManagedSessionIfPresent({ cwd: tempDir, sessionName: managedSessionName });
+			await closeManagedSessionIfPresent({ cwd: tempDir, sessionName: managedSessionName, socketDir });
 			await fixtureServer?.close();
 			await rm(tempDir, { force: true, recursive: true });
+			await rm(socketDir, { force: true, recursive: true });
 		}
 		await assertRealUpstreamLocalDaemonPassesThrough();
-		await assertRealUpstreamUnrecordedDaemonReuseFailsClosed();
+		await assertRealUpstreamRestoredDaemonReuseFailsClosed();
 		await assertRealUpstreamRestoreStorageSymlinkFailsClosed();
 		await assertRealUpstreamNestedRestoreStorageSymlinkFailsClosed();
 		await assertRealUpstreamRelativeHomeFailsClosed();

@@ -1,236 +1,15 @@
 import type { ArtifactVerificationSummary } from "../results/contracts.js";
 import { isRecord } from "../parsing.js";
 import { summarizeNetworkFailures } from "../results/network.js";
-import { getBatchResultItems, getCommandNameFromBatchItem, getSelectValues } from "./shared.js";
-import { compileAgentBrowserSemanticAction } from "./semantic-action.js";
+import { truncateText } from "../results/text.js";
+import { getBatchResultItems, getCommandNameFromBatchItem } from "./shared.js";
 import {
-	AGENT_BROWSER_JOB_STEP_ACTIONS,
-	AGENT_BROWSER_JOB_TYPE_DELAYED_TEXT_MAX_CHARACTERS,
 	AGENT_BROWSER_QA_LOAD_STATES,
-	type AgentBrowserJobStepAction,
 	type AgentBrowserQaLoadState,
 	type AgentBrowserQaPresetAnalysis,
-	type CompiledAgentBrowserJob,
 	type CompiledAgentBrowserJobStep,
 	type CompiledAgentBrowserQaPreset,
 } from "./types.js";
-
-function getRequiredJobString(step: Record<string, unknown>, field: "path" | "selector" | "text" | "url", action: AgentBrowserJobStepAction): { value?: string; error?: string } {
-	const value = step[field];
-	if (typeof value !== "string" || value.trim().length === 0) {
-		return { error: `job step ${action} requires a non-empty ${field} string.` };
-	}
-	return { value };
-}
-
-function compileJobClickOrFillStep(step: Record<string, unknown>, action: "click" | "fill"): { args?: string[]; error?: string } {
-	const hasSelector = typeof step.selector === "string" && step.selector.trim().length > 0;
-	const hasLocator = step.locator !== undefined || step.role !== undefined || step.name !== undefined || step.value !== undefined;
-	if (hasSelector && hasLocator) {
-		return { error: `job step ${action} must use either selector or semantic locator fields, not both.` };
-	}
-	if (hasSelector) {
-		if (action === "click") return { args: ["click", step.selector as string] };
-		const text = getRequiredJobString(step, "text", action);
-		if (text.error) return { error: text.error };
-		return { args: ["fill", step.selector as string, text.value as string] };
-	}
-	if (!hasLocator) {
-		return { error: `job step ${action} requires either a non-empty selector string or semantic locator fields.` };
-	}
-	const compiled = compileAgentBrowserSemanticAction({
-		action,
-		locator: step.locator,
-		name: step.name,
-		role: step.role,
-		text: step.text,
-		value: step.value,
-	});
-	if (compiled.error) return { error: compiled.error.replaceAll("semanticAction", `job step ${action}`) };
-	return { args: compiled.compiled?.args };
-}
-
-function getUnsupportedJobStepField(step: Record<string, unknown>, allowedFields: ReadonlySet<string>): string | undefined {
-	return Object.keys(step).find((field) => !allowedFields.has(field));
-}
-
-function getUnsupportedJobStepFieldError(step: Record<string, unknown>, action: AgentBrowserJobStepAction, allowedFields: ReadonlySet<string>): string | undefined {
-	const unsupportedField = getUnsupportedJobStepField(step, allowedFields);
-	if (!unsupportedField) return undefined;
-	const supportedFields = [...allowedFields].filter((field) => field !== "action");
-	const supportedText = supportedFields.length > 0 ? `supported fields are ${supportedFields.join(", ")}.` : "no additional fields are supported.";
-	return `job step ${action} does not support ${unsupportedField}; ${supportedText}`;
-}
-
-const JOB_STEP_ALLOWED_FIELDS = {
-	assertText: new Set(["action", "text"]),
-	assertUrl: new Set(["action", "url"]),
-	click: new Set(["action", "locator", "name", "role", "selector", "value"]),
-	fill: new Set(["action", "locator", "name", "role", "selector", "text", "value"]),
-	open: new Set(["action", "loadState", "url"]),
-	screenshot: new Set(["action", "path"]),
-	select: new Set(["action", "selector", "value", "values"]),
-	snapshot: new Set(["action"]),
-	type: new Set(["action", "delayMs", "press", "selector", "text"]),
-	wait: new Set(["action", "milliseconds"]),
-	waitForDownload: new Set(["action", "path"]),
-} satisfies Record<AgentBrowserJobStepAction, ReadonlySet<string>>;
-
-type CompileJobStepResult = {
-	args?: string[];
-	error?: string;
-	extraSteps?: CompiledAgentBrowserJobStep[];
-	generatedFrom?: string;
-};
-
-type JobStepCompiler = (step: Record<string, unknown>, index: number) => CompileJobStepResult;
-
-function compileJobTypeSteps(step: Record<string, unknown>): { error?: string; steps?: CompiledAgentBrowserJobStep[] } {
-	const text = getRequiredJobString(step, "text", "type");
-	if (text.error) return { error: text.error };
-	const selector = step.selector;
-	if (selector !== undefined && (typeof selector !== "string" || selector.trim().length === 0)) {
-		return { error: "job step type selector must be a non-empty string when provided." };
-	}
-	const delayMs = step.delayMs;
-	if (delayMs !== undefined && (typeof delayMs !== "number" || !Number.isInteger(delayMs) || delayMs <= 0)) {
-		return { error: "job step type delayMs must be a positive integer when provided." };
-	}
-	const press = step.press;
-	if (press !== undefined && (typeof press !== "string" || press.trim().length === 0)) {
-		return { error: "job step type press must be a non-empty key string when provided." };
-	}
-	const typedText = text.value as string;
-	const typedChars = Array.from(typedText);
-	if (typedChars.length === 0) return { error: "job step type requires non-empty text." };
-	if (delayMs !== undefined && typedChars.length > AGENT_BROWSER_JOB_TYPE_DELAYED_TEXT_MAX_CHARACTERS) {
-		return { error: `job step type delayMs supports at most ${AGENT_BROWSER_JOB_TYPE_DELAYED_TEXT_MAX_CHARACTERS} characters; split longer text into shorter calls or omit delayMs.` };
-	}
-	const compiledSteps: CompiledAgentBrowserJobStep[] = [];
-	if (delayMs === undefined) {
-		compiledSteps.push({ action: "type", args: typeof selector === "string" ? ["type", selector, typedText] : ["keyboard", "type", typedText] });
-	} else {
-		if (typeof selector === "string") compiledSteps.push({ action: "type", args: ["focus", selector], generatedFrom: "type.selector" });
-		for (const [index, char] of typedChars.entries()) {
-			compiledSteps.push({ action: "type", args: ["keyboard", "type", char], generatedFrom: "type.delayMs" });
-			if (index < typedChars.length - 1) compiledSteps.push({ action: "wait", args: ["wait", String(delayMs)], generatedFrom: "type.delayMs" });
-		}
-	}
-	if (typeof press === "string") compiledSteps.push({ action: "type", args: ["press", press], generatedFrom: "type.press" });
-	return { steps: compiledSteps };
-}
-
-function compileOpenJobStep(step: Record<string, unknown>, index: number): CompileJobStepResult {
-	const result = getRequiredJobString(step, "url", "open");
-	if (result.error) return { error: result.error };
-	const extraSteps: CompiledAgentBrowserJobStep[] = [];
-	if (step.loadState !== undefined) {
-		if (typeof step.loadState !== "string" || !AGENT_BROWSER_QA_LOAD_STATES.includes(step.loadState as AgentBrowserQaLoadState)) {
-			return { error: `job.steps[${index}].loadState must be one of: ${AGENT_BROWSER_QA_LOAD_STATES.join(", ")}.` };
-		}
-		extraSteps.push({ action: "wait", args: ["wait", "--load", step.loadState], generatedFrom: "open.loadState" });
-	}
-	return { args: ["open", result.value as string], extraSteps };
-}
-
-function compileClickJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	return compileJobClickOrFillStep(step, "click");
-}
-
-function compileFillJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	return compileJobClickOrFillStep(step, "fill");
-}
-
-function compileTypeJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	const result = compileJobTypeSteps(step);
-	if (result.error) return { error: result.error };
-	const [firstStep, ...extraSteps] = result.steps as CompiledAgentBrowserJobStep[];
-	return { args: firstStep.args, extraSteps, generatedFrom: firstStep.generatedFrom };
-}
-
-function compileSelectJobStep(step: Record<string, unknown>, index: number): CompileJobStepResult {
-	const selector = getRequiredJobString(step, "selector", "select");
-	if (selector.error) return { error: selector.error };
-	const values = getSelectValues(step, `job.steps[${index}]`);
-	if (values.error) return { error: values.error };
-	return { args: ["select", selector.value as string, ...(values.values as string[])] };
-}
-
-function compileWaitJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	const milliseconds = step.milliseconds;
-	if (typeof milliseconds !== "number" || !Number.isInteger(milliseconds) || milliseconds <= 0) {
-		return { error: "job step wait requires a positive integer milliseconds value." };
-	}
-	return { args: ["wait", String(milliseconds)] };
-}
-
-function compileAssertTextJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	const result = getRequiredJobString(step, "text", "assertText");
-	if (result.error) return { error: result.error };
-	return { args: ["wait", "--text", result.value as string] };
-}
-
-function compileAssertUrlJobStep(step: Record<string, unknown>): CompileJobStepResult {
-	const result = getRequiredJobString(step, "url", "assertUrl");
-	if (result.error) return { error: result.error };
-	return { args: ["wait", "--url", result.value as string] };
-}
-
-function compilePathArtifactJobStep(step: Record<string, unknown>, action: "screenshot" | "waitForDownload"): CompileJobStepResult {
-	const result = getRequiredJobString(step, "path", action);
-	if (result.error) return { error: result.error };
-	return { args: action === "waitForDownload" ? ["wait", "--download", result.value as string] : ["screenshot", result.value as string] };
-}
-
-// ponytail: allowedFields for each action live in JOB_STEP_ALLOWED_FIELDS (same key
-// alignment enforced by Record<AgentBrowserJobStepAction, …>), so the compiler map no
-// longer mirrors that set per entry; the call site looks it up by action.
-const JOB_STEP_COMPILERS: Record<AgentBrowserJobStepAction, JobStepCompiler> = {
-	assertText: compileAssertTextJobStep,
-	assertUrl: compileAssertUrlJobStep,
-	click: compileClickJobStep,
-	fill: compileFillJobStep,
-	open: compileOpenJobStep,
-	screenshot: (step) => compilePathArtifactJobStep(step, "screenshot"),
-	select: compileSelectJobStep,
-	snapshot: () => ({ args: ["snapshot", "-i"] }),
-	type: compileTypeJobStep,
-	wait: compileWaitJobStep,
-	waitForDownload: (step) => compilePathArtifactJobStep(step, "waitForDownload"),
-};
-
-export function compileAgentBrowserJob(input: unknown): { compiled?: CompiledAgentBrowserJob; error?: string } {
-	if (!isRecord(input)) {
-		return { error: "job must be an object." };
-	}
-	const rawFailFast = input.failFast;
-	if (rawFailFast !== undefined && typeof rawFailFast !== "boolean") {
-		return { error: "job.failFast must be a boolean when provided." };
-	}
-	const failFast = rawFailFast !== false;
-	const rawSteps = input.steps;
-	if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
-		return { error: "job.steps must be a non-empty array." };
-	}
-	const steps: CompiledAgentBrowserJobStep[] = [];
-	for (const [index, rawStep] of rawSteps.entries()) {
-		if (!isRecord(rawStep)) {
-			return { error: `job.steps[${index}] must be an object.` };
-		}
-		const action = rawStep.action;
-		if (typeof action !== "string" || !AGENT_BROWSER_JOB_STEP_ACTIONS.includes(action as AgentBrowserJobStepAction)) {
-			return { error: `job.steps[${index}].action must be one of: ${AGENT_BROWSER_JOB_STEP_ACTIONS.join(", ")}.` };
-		}
-		const jobAction = action as AgentBrowserJobStepAction;
-		const compile = JOB_STEP_COMPILERS[jobAction];
-		const unsupportedFieldError = getUnsupportedJobStepFieldError(rawStep, jobAction, JOB_STEP_ALLOWED_FIELDS[jobAction]);
-		if (unsupportedFieldError) return { error: `job.steps[${index}]: ${unsupportedFieldError}` };
-		const compiledStep = compile(rawStep, index);
-		if (compiledStep.error) return { error: compiledStep.error.startsWith(`job.steps[${index}]`) ? compiledStep.error : `job.steps[${index}]: ${compiledStep.error}` };
-		steps.push({ action: jobAction, args: compiledStep.args as string[], generatedFrom: compiledStep.generatedFrom }, ...(compiledStep.extraSteps ?? []));
-	}
-	return { compiled: { args: failFast ? ["batch", "--bail"] : ["batch"], failFast, stdin: JSON.stringify(steps.map((step) => step.args)), steps } };
-}
 
 function describeQaChecksRun(checks: CompiledAgentBrowserQaPreset["checks"]): string {
 	const parts = [`load:${checks.loadState}`];
@@ -277,7 +56,7 @@ export function buildQaCompactPassText(options: {
 	if (pageParts.length > 0) lines.push(`Page: ${pageParts.join(" — ")}`);
 	lines.push(`Checks run: ${describeQaChecksRun(options.checks)} (${options.batchStepCount} batch step${options.batchStepCount === 1 ? "" : "s"})`);
 	if (options.checks.diagnosticsResetAtStart && (options.checks.checkNetwork || options.checks.checkConsole || options.checks.checkErrors)) {
-		lines.push("Diagnostic isolation: URL QA clears enabled network/console buffers, then snapshots any page-error residue before opening the target. Only unchanged residue is ignored because upstream page-error clear is not reliable.");
+		lines.push("Diagnostic isolation: URL QA requests clears of enabled diagnostic buffers before opening the target.");
 	}
 	if (options.checks.attached && !options.checks.diagnosticsResetAtStart && (options.checks.checkNetwork || options.checks.checkConsole || options.checks.checkErrors)) {
 		lines.push("Attached diagnostics: existing upstream session console/network/error buffers were preserved; rows may include events from before qa.attached started.");
@@ -294,18 +73,20 @@ export function buildQaCompactPassText(options: {
 
 export function buildQaCompactFailureText(options: {
 	causalError?: string;
-	executedStepCount: number;
+	executedStepCount?: number;
 	page?: { title?: string; url?: string };
 	plannedStepCount: number;
 	qaPreset: AgentBrowserQaPresetAnalysis;
 }): string {
-	const lines = [options.causalError ?? options.qaPreset.summary];
+	const lines = [options.causalError
+		? truncateText(options.causalError.replace(/\s+/g, " ").trim(), 700)
+		: options.qaPreset.summary];
 	const pageParts = [options.page?.title, options.page?.url].filter((part): part is string => typeof part === "string" && part.length > 0);
 	if (pageParts.length > 0) lines.push(`Page: ${pageParts.join(" — ")}`);
 	if (options.qaPreset.failedChecks.length > 0) lines.push("Failed checks:", ...options.qaPreset.failedChecks.map((failure) => `- ${failure}`));
 	if (options.qaPreset.notRunChecks.length > 0) lines.push("Not run:", ...options.qaPreset.notRunChecks.map((check) => `- ${check}`));
 	if (options.qaPreset.warnings.length > 0) lines.push("Warnings:", ...options.qaPreset.warnings.map((warning) => `- ${warning}`));
-	lines.push(`Execution: ${options.executedStepCount}/${options.plannedStepCount} batch steps`);
+	lines.push(`Execution: ${options.executedStepCount ?? "unknown"}/${options.plannedStepCount} batch steps`);
 	lines.push("Full diagnostic matrix: see details.qaPreset and details.batchSteps.");
 	return lines.join("\n");
 }
@@ -384,22 +165,22 @@ function qaErrorSignature(error: unknown): string {
 	}
 }
 
-function subtractQaBaselineErrors(errors: unknown[], baselineErrors: unknown[]): { ignoredCount: number; novelErrors: unknown[] } {
+function subtractQaBaselineErrors(errors: unknown[], baselineErrors: unknown[]): { matchedCount: number; novelErrors: unknown[] } {
 	const baselineCounts = new Map<string, number>();
 	for (const error of baselineErrors) {
 		const signature = qaErrorSignature(error);
 		baselineCounts.set(signature, (baselineCounts.get(signature) ?? 0) + 1);
 	}
-	let ignoredCount = 0;
+	let matchedCount = 0;
 	const novelErrors = errors.filter((error) => {
 		const signature = qaErrorSignature(error);
 		const count = baselineCounts.get(signature) ?? 0;
 		if (count === 0) return true;
 		baselineCounts.set(signature, count - 1);
-		ignoredCount += 1;
+		matchedCount += 1;
 		return false;
 	});
-	return { ignoredCount, novelErrors };
+	return { matchedCount, novelErrors };
 }
 
 function isDiagnosticResetCommand(item: Record<string, unknown>): boolean {
@@ -469,9 +250,9 @@ export function analyzeQaPresetResults(data: unknown, compiled?: CompiledAgentBr
 			continue;
 		}
 		if (commandName === "errors" && Array.isArray(result?.errors) && result.errors.length > 0) {
-			const { ignoredCount, novelErrors } = subtractQaBaselineErrors(result.errors, baselineErrors);
+			const { matchedCount, novelErrors } = subtractQaBaselineErrors(result.errors, baselineErrors);
 			if (novelErrors.length > 0) failedChecks.push(`${novelErrors.length} page error(s)`);
-			if (ignoredCount > 0) warnings.push(`${ignoredCount} post-clear page error residue row(s) ignored as unchanged`);
+			if (matchedCount > 0) failedChecks.push(`page-error check could not be verified (${matchedCount} row(s) matched the post-clear baseline; old residue and identical new errors are indistinguishable)`);
 		}
 		if (commandName === "console" && Array.isArray(result?.messages)) {
 			const errorCount = result.messages.filter((message) => isRecord(message) && /error/i.test(String(message.type ?? message.level ?? ""))).length;
@@ -496,18 +277,18 @@ export function analyzeQaPresetResults(data: unknown, compiled?: CompiledAgentBr
 			if (!actual || !actual.includes(expected)) failedChecks.push(`expected text not found: ${formatQaExpectedTextPreview(expected)}`);
 		});
 	}
+	const stoppedEarly = compiled && items.length < compiled.steps.length;
+	const failedFast = stoppedEarly && items.at(-1)?.success === false;
+	if (stoppedEarly && !failedFast) failedChecks.push("QA execution could not be verified (incomplete batch results)");
 	const uniqueFailures = [...new Set(failedChecks)];
 	const uniqueWarnings = [...new Set(warnings)];
-	const notRunChecks = compiled ? describeNotRunQaChecks(compiled, items.length) : [];
-	const passed = uniqueFailures.length === 0 && notRunChecks.length === 0;
+	const notRunChecks = compiled && failedFast ? describeNotRunQaChecks(compiled, items.length) : [];
 	return {
 		failedChecks: uniqueFailures,
 		notRunChecks,
-		passed,
+		passed: uniqueFailures.length === 0,
 		summary: uniqueFailures.length === 0
-			? notRunChecks.length > 0
-				? `QA preset incomplete: ${notRunChecks.length} check${notRunChecks.length === 1 ? "" : "s"} not run.`
-				: uniqueWarnings.length === 0 ? "QA preset passed." : `QA preset passed with warnings: ${uniqueWarnings.join("; ")}.`
+			? uniqueWarnings.length === 0 ? "QA preset passed." : `QA preset passed with warnings: ${uniqueWarnings.join("; ")}.`
 			: `QA preset failed: ${uniqueFailures.join("; ")}.`,
 		warnings: uniqueWarnings,
 	};

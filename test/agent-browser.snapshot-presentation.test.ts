@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -103,14 +103,19 @@ test("buildToolPresentation compacts oversized snapshots and spills a redacted s
 	assert.ok(spillPath);
 	assert.match(text, new RegExp(spillPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	const spillText = await readFile(spillPath, "utf8");
-	const spillStats = await stat(spillPath);
-	const spillDirStats = await stat(dirname(spillPath));
+	const spillStats = await lstat(spillPath);
+	const spillDirStats = await lstat(dirname(spillPath));
 	assert.match(spillText, /Large snapshot row 120/);
 	assert.match(spillText, /Actionable control 1/);
 	assert.match(spillText, /SAMLRequest=%5BREDACTED%5D&RelayState=%5BREDACTED%5D/);
 	assert.doesNotMatch(spillText, /saml-secret|relay-secret/);
-	assert.equal(spillStats.mode & 0o777, 0o600);
-	assert.equal(spillDirStats.mode & 0o777, 0o700);
+	assert.equal(spillStats.isFile(), true);
+	assert.equal(spillDirStats.isDirectory(), true);
+	// Windows mode bits do not represent POSIX owner-only access; retain type and content proof there.
+	if (process.platform !== "win32") {
+		assert.equal(spillStats.mode & 0o777, 0o600);
+		assert.equal(spillDirStats.mode & 0o777, 0o700);
+	}
 	await rm(spillPath, { force: true });
 });
 
@@ -145,8 +150,15 @@ test("buildToolPresentation keeps compact snapshot spill files in the persisted 
 		assert.equal(spillPath?.startsWith(join(sessionDir, ".pi-agent-browser-artifacts", TEST_SESSION_ID)), true);
 		await cleanupSecureTempArtifacts();
 		assert.match(await readFile(String(spillPath), "utf8"), /Persisted snapshot row 120/);
-		assert.equal((await stat(String(spillPath))).mode & 0o777, 0o600);
-		assert.equal((await stat(dirname(String(spillPath)))).mode & 0o777, 0o700);
+		const spillStats = await lstat(String(spillPath));
+		const spillDirStats = await lstat(dirname(String(spillPath)));
+		assert.equal(spillStats.isFile(), true);
+		assert.equal(spillDirStats.isDirectory(), true);
+		// NTFS access is governed by ACLs, not the POSIX permission bits exposed by stat.
+		if (process.platform !== "win32") {
+			assert.equal(spillStats.mode & 0o777, 0o600);
+			assert.equal(spillDirStats.mode & 0o777, 0o700);
+		}
 	} finally {
 		await cleanupSecureTempArtifacts();
 		await rm(sessionDir, { force: true, recursive: true });

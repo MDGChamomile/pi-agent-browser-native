@@ -1,5 +1,6 @@
 import { execFile, type ChildProcess } from "node:child_process";
 import { lstat, rm } from "node:fs/promises";
+import { win32 } from "node:path";
 import { promisify } from "node:util";
 
 import { fetchCdpJson, parseCdpTargets, parseCdpVersion } from "./cdp.js";
@@ -84,19 +85,35 @@ export async function inspectElectronLaunchStatus(record: ElectronLaunchRecord, 
 	};
 }
 
+function hasProcessExited(child: ChildProcess | undefined, pid: number | undefined): boolean {
+	// A Windows PID probe can report ESRCH during termination, before the
+	// tracked process has exited and released its executable/resources.
+	return child ? child.exitCode !== null || child.signalCode !== null : isPidAlive(pid) === false;
+}
+
 async function waitForProcessExit(child: ChildProcess | undefined, pid: number | undefined, deadlineMs: number): Promise<boolean> {
 	while (Date.now() <= deadlineMs) {
-		if (child && (child.exitCode !== null || child.signalCode !== null)) return true;
-		if (isPidAlive(pid) === false) return true;
+		if (hasProcessExited(child, pid)) return true;
 		await sleep(ELECTRON_CLEANUP_POLL_INTERVAL_MS);
 	}
-	return isPidAlive(pid) === false;
+	return hasProcessExited(child, pid);
 }
 
 async function readPidCommandLine(pid: number | undefined): Promise<string | undefined> {
 	if (!pid || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
 	try {
-		const { stdout } = await execFileAsync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+		// Win32_Process.CommandLine is the native ownership evidence; process
+		// start time (used by daemon-policy locks) cannot prove profile ownership.
+		const systemRoot = process.env.SystemRoot;
+		const windowsRoot = systemRoot && win32.isAbsolute(systemRoot) ? systemRoot : "C:\\Windows";
+		const file = process.platform === "win32"
+			? win32.join(windowsRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+			: "ps";
+		const args = process.platform === "win32"
+			? ["-NoProfile", "-NonInteractive", "-Command",
+				`[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); $p = [wmi]"Win32_Process.Handle='${pid}'"; [Console]::WriteLine($p.CommandLine)`]
+			: ["-ww", "-p", String(pid), "-o", "command="];
+		const { stdout } = await execFileAsync(file, args, {
 			timeout: RESTORED_PROCESS_COMMAND_TIMEOUT_MS,
 		});
 		return stdout.trim() || undefined;
@@ -146,7 +163,7 @@ function signalRestoredLaunchProcess(record: ElectronLaunchRecord, signal: NodeJ
 
 async function cleanupProcess(record: ElectronLaunchRecord, child: ChildProcess | undefined, deadlineMs: number): Promise<ElectronCleanupStep> {
 	if (!record.pid) return { resource: "process", state: "skipped" };
-	if (isPidAlive(record.pid) === false) return { resource: "process", state: "already-gone" };
+	if (hasProcessExited(child, record.pid)) return { resource: "process", state: "already-gone" };
 	if (!child) {
 		const verificationError = await getRestoredProcessVerificationError(record);
 		if (verificationError) return { error: verificationError, resource: "process", state: "failed" };

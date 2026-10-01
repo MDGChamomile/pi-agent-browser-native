@@ -6,18 +6,31 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
 	acquireManagedSessionPolicyLock,
-	getManagedSessionPolicyLockPath,
+	getBrowserExecutionLockPath,
+	resolveBrowserExecutionIdentity,
 } from "../extensions/agent-browser/lib/managed-session-policy-lock.js";
 
 const sessionName = `piab-policy-lock-${process.pid}`;
-const lockBasePath = getManagedSessionPolicyLockPath(sessionName);
+const originalSocketDir = process.env.PI_AGENT_BROWSER_SOCKET_DIR;
+const socketDir = await fs.mkdtemp(join(tmpdir(), "piab-policy-"));
+process.env.PI_AGENT_BROWSER_SOCKET_DIR = socketDir;
+const lockBasePath = getBrowserExecutionLockPath(await resolveBrowserExecutionIdentity({ sessionName, ownedManagedSession: true }));
+test.after(async () => {
+	if (originalSocketDir === undefined) delete process.env.PI_AGENT_BROWSER_SOCKET_DIR;
+	else process.env.PI_AGENT_BROWSER_SOCKET_DIR = originalSocketDir;
+	await rm(socketDir, { recursive: true, force: true });
+});
 const claimPrefix = `${basename(lockBasePath)}.claim-`;
 const testOrphanPath = join(dirname(lockBasePath), `.pi-agent-browser-policy-remove-test-${process.pid}`);
 
@@ -68,21 +81,30 @@ test("managed session policy lock waits asynchronously and releases only its imm
 
 test("managed session policy lock cleans dead removal artifacts", async () => {
 	await mkdir(testOrphanPath, { mode: 0o700 });
-	await writeFile(join(testOrphanPath, "owner.json"), JSON.stringify({ pid: 2_147_483_647, startIdentity: "dead", token: "orphan", version: 3 }), { mode: 0o600 });
+	await writeFile(join(testOrphanPath, "owner.json"), JSON.stringify({ pid: 2_147_483_647, startIdentity: "dead", token: "orphan", sessionNames: null, version: 4 }), { mode: 0o600 });
 	const lock = await acquireManagedSessionPolicyLock({ sessionName });
 	assert.ok(lock);
 	await assert.rejects(stat(testOrphanPath), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	await lock.release();
 });
 
-test("managed session policy lock fails closed without repairing unsafe owner permissions", async () => {
+test("managed session policy lock fails closed without repairing unsafe owner metadata or POSIX permissions", async () => {
 	const first = await acquireManagedSessionPolicyLock({ sessionName });
 	assert.ok(first);
 	const claimPath = await onlyClaimPath();
 	const ownerPath = join(claimPath, "owner.json");
-	await chmod(ownerPath, 0o644);
+	if (process.platform === "win32") {
+		// chmod cannot express POSIX group/world access on Windows. Corrupt
+		// the required identity instead and retain the same fail-closed contract.
+		const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+		await writeFile(ownerPath, JSON.stringify({ ...owner, startIdentity: "" }));
+	} else {
+		await chmod(ownerPath, 0o644);
+	}
+	const unsafeOwner = await readFile(ownerPath, "utf8");
 	assert.equal(await acquireManagedSessionPolicyLock({ sessionName, timeoutMs: 25 }), undefined);
-	assert.equal((await stat(ownerPath)).mode & 0o777, 0o644);
+	assert.equal(await readFile(ownerPath, "utf8"), unsafeOwner);
+	if (process.platform !== "win32") assert.equal((await stat(ownerPath)).mode & 0o777, 0o644);
 	await first.release();
 	await stat(claimPath);
 });
@@ -101,6 +123,90 @@ test("managed session policy lock serializes concurrent contenders", async () =>
 	}));
 	assert.equal(maxActive, 1);
 });
+
+for (const publicationRead of [1, 2]) {
+	test(`managed session policy lock refreshes a choosing ticket published after missing read ${publicationRead}`, async (t) => {
+		// Obtain real native owner identity, then model another live claim choosing
+		// its ticket. Only filesystem interleaving is controlled, never identity results.
+		const seed = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(seed);
+		const owner = JSON.parse(await readFile(join(await onlyClaimPath(), "owner.json"), "utf8"));
+		await seed.release();
+		owner.token = randomUUID();
+		const choosingPath = `${lockBasePath}.claim-${owner.token}`;
+		const ticketPath = join(choosingPath, "ticket.json");
+		await mkdir(choosingPath, { mode: 0o700 });
+		await writeFile(join(choosingPath, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+		const nativeLstat = fs.lstat;
+		const nativeRename = fs.rename;
+		let ownTicketPublished = false;
+		let missingReads = 0;
+		t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+			const result = await nativeRename(...args);
+			if (String(args[1]).endsWith("ticket.json") && String(args[1]) !== ticketPath) ownTicketPublished = true;
+			return result;
+		});
+		t.mock.method(fs, "lstat", async (...args: Parameters<typeof fs.lstat>) => {
+			try { return await nativeLstat(...args); } catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT" && String(args[0]) === ticketPath && ownTicketPublished) {
+					missingReads += 1;
+					if (missingReads === publicationRead) {
+						const candidate = join(choosingPath, ".ticket.tmp");
+						await writeFile(candidate, JSON.stringify({ ticket: 2, token: owner.token, version: 4 }), { mode: 0o600 });
+						await nativeRename(candidate, ticketPath);
+					}
+				}
+				throw error; // Preserve the actual missing-file observation.
+			}
+		});
+		syncBuiltinESMExports();
+		try {
+			// No waiting is needed once the later ticket is published. A stale
+			// choosing snapshot must not consume even an immediate wait budget.
+			const lock = await acquireManagedSessionPolicyLock({ sessionName, timeoutMs: 0 });
+			assert.ok(lock, "a completed later ticket must not block the earlier ticket");
+			assert.equal(missingReads, publicationRead);
+			await lock.release();
+			assert.deepEqual(await claimPaths(), [choosingPath]);
+			assert.equal(JSON.parse(await readFile(ticketPath, "utf8")).ticket, 2);
+		} finally {
+			t.mock.restoreAll();
+			syncBuiltinESMExports();
+		}
+	});
+}
+
+for (const holdMs of [0, 1_100]) {
+	test(`managed session policy lock releases after a native open-file rename conflict ${holdMs === 0 ? "within" : "after"} its acquisition wait`, async (t) => {
+		const lock = await acquireManagedSessionPolicyLock({ sessionName });
+		assert.ok(lock);
+		// A protected native close can outlast the default 1,000 ms acquisition wait.
+		if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
+		const claimPath = await onlyClaimPath();
+		const reader = await fs.open(join(claimPath, "owner.json"), "r");
+		const nativeRename = fs.rename;
+		let nativeConflict = false;
+		t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+			try { return await nativeRename(...args); } catch (error) {
+				if (String(args[0]) === claimPath && (error as NodeJS.ErrnoException).code === "EPERM") {
+					nativeConflict = true;
+					await reader.close(); // The actual competing reader finishes.
+				}
+				throw error; // Never fabricate or replace the native rename result.
+			}
+		});
+		syncBuiltinESMExports();
+		try {
+			await lock.release();
+			if (process.platform === "win32") assert.equal(nativeConflict, true);
+			assert.deepEqual(await claimPaths(), []);
+		} finally {
+			t.mock.restoreAll();
+			syncBuiltinESMExports();
+			await reader.close();
+		}
+	});
+}
 
 test("managed session policy lock excludes a live owner in another process", async () => {
 	const moduleUrl = new URL("../extensions/agent-browser/lib/managed-session-policy-lock.ts", import.meta.url).href;
