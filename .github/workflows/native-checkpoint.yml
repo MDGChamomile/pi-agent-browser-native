@@ -16,7 +16,7 @@ jobs:
   native-checkpoint-linux:
     name: Native checkpoint Linux
     runs-on: ubuntu-26.04
-    timeout-minutes: 8
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash

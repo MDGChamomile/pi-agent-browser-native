@@ -11,6 +11,7 @@
 ### Fixed
 
 - Restore extension startup in consumer installs by replaying native tool-name deltas without a dynamic host-package import (#210, #207).
+- Expose an object-rooted Electron tool schema for strict providers while preserving action-specific validation (#214).
 - Prevent dispatch after an unconfirmed begin, stop dependent code after an unconfirmed finish, and preserve observed native lifecycle effects through presentation/export failure.
 - Invalidate refs on changed or unverifiable native daemon generations, including same-URL replacement and helper captures. Restart reuses wrapper-owned launch provenance only after matching the native generation and restore key; ordinary forks cannot inherit parent Electron/script cleanup rights.
 
