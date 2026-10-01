@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## 0.8.3 - 2026-10-01
+
 ### Changed
 
 - Update the official Pi validation graph to 0.99.2; wildcard runtime peers and the Pi 0.87.0 minimum remain unchanged.
+- Deliver complete browser guidance through public instruction groups on capable hosts and the same guidance eagerly on official Pi (#230).
+- Require an Android-native TypeScript 7 `tsgo` on `PATH` for Termux Git/source installs and type checks; macOS and Linux keep the package-local compiler.
 - Persist small canonical browser begin/finish events, complete ref definitions once per capture, and artifact-row changes instead of repeating full state after ordinary commands. Tool results retain invocation receipts and dedicated capture/export data.
 - Replay selected journal envelopes and winning definitions through public Pi APIs with bounded token parsing on official and fork hosts. Stock official Pi's own eager loader remains a separate limitation.
 - Add `pi-agent-browser-convert` for validated offline separate-copy conversion of stopped legacy sessions, preserving original bytes, ancestry, explicit observations and source-owner cleanup facts.
