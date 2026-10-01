@@ -5,6 +5,7 @@ import { omitUpstreamLifecycle } from "./common.js";
 import { redactTimeoutPartialProgress } from "../../orchestration/browser-run/diagnostics.js";
 
 export type { AgentBrowserObservation } from "../contracts.js";
+export const OBSERVATION_INLINE_MAX_CHARS = 16_000;
 
 export function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -52,6 +53,8 @@ export function projectAgentBrowserObservation(details: Record<string, unknown>,
 		if (details[key] !== undefined) observation[key] = details[key];
 	}
 	if (details.inspection === true && details.data === undefined && typeof details.stdout === "string") observation.data = details.stdout;
+	// Identical error/summary strings double-count large failure text against the observation bound; keep error.
+	if (typeof observation.error === "string" && observation.error === observation.summary) observation.summary = undefined;
 	if (isRecord(observation.data)) observation.data = omitUpstreamLifecycle(observation.data);
 	if (Array.isArray(details.batchSteps)) {
 		observation.batchSteps = details.batchSteps.filter(isRecord).map(step => {

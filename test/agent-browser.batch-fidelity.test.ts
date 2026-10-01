@@ -20,7 +20,6 @@ import {
 	createToolBranchEntry,
 	executeRegisteredTool,
 	runExtensionEvent,
-	runExtensionEventResults,
 	startAgentBrowserContractFixtureServer,
 	withPatchedEnv,
 	writeFakeAgentBrowserBinary,
@@ -399,8 +398,7 @@ test("real upstream batch argv and ref fidelity for pinned and unpinned register
 							assert.deepEqual(rows.map((row) => row.success), bail ? [true, false] : [true, false, true]);
 							assert.equal((result.details?.batchFailure as { failedStep: { index: number } }).failedStep.index, 1);
 							assert.match(result.content[0]?.text ?? "", /Batch failed:/);
-							const patches = await runExtensionEventResults<{ isError?: boolean }>(h.handlers, "tool_result", { toolName: "agent_browser", toolCallId: "fixture", input: { args: [...prefix, "batch"] }, ...result, isError: false }, h.ctx);
-							assert.equal(patches[0]?.isError, true);
+							// Canonical failure projection: the returned result already carries isError; the removed tool_result patch hook is covered by the handler-list contract.
 							assert.equal(JSON.parse((await direct(["get", "value", "#name-input"])).stdout).data.value, bail ? "before" : "after");
 						}
 					});

@@ -26,7 +26,7 @@ const EXTENSION_ENTRYPOINTS = Object.freeze([
 	"dist/extensions/agent-browser/index.js",
 ]);
 const RECOMMENDED_VERSION = TARGET_AGENT_BROWSER_VERSION;
-export const MINIMUM_PI_VERSION = "0.87.0";
+export const MINIMUM_PI_VERSION = "1.0.0";
 const DEFAULT_AGENT_DIR = resolve(homedir(), ".pi/agent");
 const THIS_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,7 +44,7 @@ function parseVersionParts(version) {
 	return match.slice(1).map((part) => Number.parseInt(part, 10));
 }
 
-function versionAtLeast(actual, minimum) {
+export function versionAtLeast(actual, minimum) {
 	const actualParts = parseVersionParts(actual);
 	const minimumParts = parseVersionParts(minimum);
 	if (!actualParts || !minimumParts) return undefined;

@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
 
 import { KeyedAsyncExecutionQueue, mergeBrowserRunArtifactManifest } from "../extensions/agent-browser/index.js";
@@ -52,7 +52,7 @@ test("agentBrowserExtension keeps full browser guidance and installed doc pointe
 	const isolatedHome = await mkdtemp(join(tmpdir(), "pi-agent-browser-guidance-test-"));
 	await withPatchedEnv({ BRAVE_API_KEY: "demo-key", EXA_API_KEY: undefined, HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: process.cwd() });
-		assert.deepEqual([...harness.handlers.keys()].sort(), ["before_agent_start", "session_checkpoint", "session_shutdown", "session_start", "session_tree", "tool_call", "tool_result"]);
+		assert.deepEqual([...harness.handlers.keys()].sort(), ["before_agent_start", "message_end", "session_shutdown", "session_start", "session_tree", "tool_call"]);
 		assert.equal(harness.tool.name, "agent_browser");
 		assert.match(harness.tool.description, /native agent-browser commands/);
 		assert.match(harness.tool.promptSnippet, /native command batches/);
@@ -162,7 +162,7 @@ test("built extension prompt doc pointers resolve to package-root docs", { skip:
 	(extension.default as (api: typeof pi) => void)(pi);
 
 	const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
-	await beforeStart!(event, { cwd: process.cwd() });
+	await beforeStart!(event, { cwd: process.cwd(), isProjectTrusted: () => true });
 	const guideline = event.systemPromptOptions.sections.agent_browser?.split("\n").find(line => line.includes("COMMAND_REFERENCE.md"));
 	assert.ok(guideline);
 	assert.doesNotMatch(guideline, /\/dist\/docs\//);
@@ -2164,6 +2164,57 @@ test("agentBrowserExtension renders long TUI output compactly without changing m
 	assert.match(expandedText, /item-24/);
 	assert.doesNotMatch(expandedText, /\.\.\. \(\d+ more lines/);
 
+	// Host updates can wrap the same row result in a fresh object each time.
+	const { AgentBrowserResultComponent } = await import("../extensions/agent-browser/lib/pi-tool-rendering.js");
+	const cached = new AgentBrowserResultComponent();
+	let colorCalls = 0;
+	let themeVersion = {};
+	let themePrefix = "";
+	const countFg: typeof PLAIN_RENDER_THEME.fg = (color, text) => {
+		colorCalls++;
+		return `${themePrefix}${PLAIN_RENDER_THEME.fg(color, text)}`;
+	};
+	const liveTheme = new Proxy(PLAIN_RENDER_THEME, {
+		get(target, key) {
+			if (key === "fg") return countFg;
+			if (key === "colors") return themeVersion;
+			return Reflect.get(target, key, target);
+		},
+	});
+	cached.setResult(longResult, { expanded: false, isPartial: false }, liveTheme, false);
+	assert.ok(colorCalls > 20, "initial JSON tokens are colorized");
+	const firstCachedLines = cached.render(80);
+	colorCalls = 0;
+	const nativeSetText = Text.prototype.setText;
+	let resets = 0;
+	Text.prototype.setText = function (value) {
+		resets++;
+		nativeSetText.call(this, value);
+	};
+	try {
+		for (let index = 0; index < 100; index++) {
+			cached.setResult({ ...longResult, content: [...longResult.content], details: { summary: "large JSON result" } }, { expanded: index % 2 === 0, isPartial: false }, liveTheme, false);
+		}
+		assert.equal(colorCalls, 0, "unchanged row updates must not parse/colorize the complete output again");
+		cached.setResult({ ...longResult, details: { summary: "changed summary, identical visible output" } }, { expanded: false, isPartial: false }, liveTheme, false);
+		assert.equal(resets, 0, "identical formatted output must retain the native Text layout cache");
+	} finally {
+		Text.prototype.setText = nativeSetText;
+	}
+	assert.deepEqual(cached.render(80), firstCachedLines);
+	cached.setResult(longResult, { expanded: true, isPartial: false }, liveTheme, false);
+	assert.match(cached.render(24).join("\n"), /item-24/);
+	cached.setResult(failedResult, { expanded: false, isPartial: false }, liveTheme, true);
+	assert.match(cached.render(200).join("\n"), /selector-not-found/);
+	cached.setResult({ ...failedResult, details: { resultCategory: "failure", failureCategory: "timeout" } }, { expanded: false, isPartial: false }, liveTheme, true);
+	assert.match(cached.render(200).join("\n"), /failureCategory: timeout/);
+	cached.setResult(longResult, { expanded: false, isPartial: true }, liveTheme, false);
+	assert.match(cached.render(200).join("\n"), /Running agent-browser/);
+	themeVersion = {};
+	themePrefix = "changed-theme:";
+	cached.setResult(longResult, { expanded: false, isPartial: false }, liveTheme, false);
+	assert.match(cached.render(200).join("\n"), /changed-theme:/);
+
 	const scalarResult: AgentToolResult<unknown> = {
 		content: [{ type: "text", text: "Clicked: true\x1B[31m red\x1B[0m\nHref: https://example.com/next\x1B]0;pwned\x07\nNull\x00byte\nEmoji: 👩‍💻\nSeparator: left\u2028right" }],
 		details: { summary: "click completed" },
@@ -2201,6 +2252,22 @@ test("agentBrowserExtension renders long TUI output compactly without changing m
 test("agentBrowserExtension blocks direct and wrapped agent-browser bash unless the prompt, env, or package dev cwd explicitly allows it", async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-bash-policy-"));
 	const defaultHarness = createExtensionHarness({ cwd: tempDir, prompt: "Open a page and summarize it." });
+	const noHistoryCtx = {
+		...defaultHarness.ctx,
+		sessionManager: {
+			...defaultHarness.ctx.sessionManager,
+			getBranch() { throw new Error("Unrelated tool calls must not copy the branch"); },
+			getEntry() { throw new Error("Unrelated tool calls must not query history"); },
+		},
+	};
+	for (const event of [
+		{ toolName: "read", input: { path: "README.md" } },
+		{ toolName: "agent_browser_tools", input: {} },
+		{ toolName: "bash", input: { command: "printf audit" } },
+		{ toolName: "bash", input: { command: "which agent-browser" } },
+	]) {
+		assert.deepEqual(await runExtensionEventResults(defaultHarness.handlers, "tool_call", event, noHistoryCtx), []);
+	}
 	for (const command of [
 		"agent-browser open https://example.com",
 		"FOO=bar agent-browser --version",
@@ -2223,6 +2290,23 @@ test("agentBrowserExtension blocks direct and wrapped agent-browser bash unless 
 		assert.equal(blocked?.block, true, command);
 		assert.match(blocked?.reason ?? "", /Use the native agent_browser tool instead of bash/i);
 	}
+
+	const userMessage = { role: "user", content: "Please debug the browser integration via bash.", timestamp: 0 };
+	await runExtensionEvent(defaultHarness.handlers, "message_end", { message: userMessage }, defaultHarness.ctx);
+	const directEvent = { toolName: "bash", input: { command: "agent-browser open https://example.com" } };
+	assert.deepEqual(await runExtensionEventResults(defaultHarness.handlers, "tool_call", directEvent, noHistoryCtx), []);
+	// Pi applies later message_end replacements to this same message before persistence.
+	userMessage.content = "Open a page and summarize it.";
+	const [blockedAfterReplacement] = await runExtensionEventResults<{ block: boolean }>(
+		defaultHarness.handlers, "tool_call", directEvent, noHistoryCtx,
+	);
+	assert.equal(blockedAfterReplacement?.block, true);
+	userMessage.content = "Please debug the browser integration via bash.";
+	await runExtensionEvent(defaultHarness.handlers, "session_tree", { newLeafId: "original", oldLeafId: "steered" }, defaultHarness.ctx);
+	const [blockedAfterTree] = await runExtensionEventResults<{ block: boolean }>(
+		defaultHarness.handlers, "tool_call", directEvent, noHistoryCtx,
+	);
+	assert.equal(blockedAfterTree?.block, true, "branch navigation restores raw user intent instead of retaining steered text");
 
 	const inspectionAllowed = await runExtensionEventResults(
 		defaultHarness.handlers,

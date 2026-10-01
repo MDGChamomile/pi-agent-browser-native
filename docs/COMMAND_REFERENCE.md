@@ -10,13 +10,15 @@ Related docs:
 
 ## Purpose
 
-Requires Pi 0.87.0 or newer; official and fork hosts are qualified independently.
+Requires Pi 1.0.0 or newer; official and fork hosts are qualified independently.
 
 Provide a local, repo-readable command reference for the native `agent_browser` tool.
 
 This project intentionally blocks normal `agent-browser` bash usage in most agent sessions, so the agent still needs an accessible local equivalent of the upstream command surface. This document is the durable reference the agent can read inside the repository without calling the binary directly.
 
 After updating `pi-agent-browser-native`, fully quit and restart Pi before using the updated tools. `/reload` can retain previously loaded compiled JavaScript even after `dist/` is rebuilt, so it is not a reliable way to pick up package updates.
+
+Tool declarations use the native `browser` namespace and output schemas. Native `structuredContent` carries the same bounded redacted observation as direct/code output; loader inventory and optional search retain their existing data shapes. It does not expose internal replay details or turn image paths/handles into native `image()` input. The five advanced direct tools default inactive; enable them through `agent_browser_tools` unless already selected by the host. See [canonical observations](TOOL_CONTRACT.md#canonical-observation).
 
 SDK hosts can supply an awaited [`beforeExecute` callback](TOOL_CONTRACT.md#host-execution-hook) to save host state before ordinary or code-inner browser dispatch. This is a factory option, not a tool argument; normal installations do not need it.
 
@@ -910,7 +912,7 @@ When these commands are invoked through the native `agent_browser` tool, structu
 - project-local: `.pi/config/pi-agent-browser-native/config.json`
 - explicit override: `PI_AGENT_BROWSER_CONFIG=/path/to/config.json`
 
-Get an Exa API key from the [Exa dashboard](https://dashboard.exa.ai/api-keys) or a Brave Search API key from the [Brave Search API dashboard](https://api-dashboard.search.brave.com/). If both keys are available, `agent_browser_web_search` prefers Exa by default because its `/search` endpoint returns token-efficient highlights and agent-oriented search modes; set `webSearch.preferredProvider` to `"brave"` when Brave Search is preferred. You can also disable this package's search tool with `webSearch.enabled: false` when another search tool should win. Config merges global → project → `PI_AGENT_BROWSER_CONFIG` override, so `enabled` is read from the final loaded config: a global disable can be re-enabled by project or override config, while an override file with `enabled: false` is the highest-priority hard disable for that run. Under Pi 0.84.0+, globally installed or CLI-loaded extensions are developer-trusted code, so this extension reads project-local config under `.pi/config/...` by default and skips that project layer when Pi reports the project is untrusted or when launched with `--no-approve`.
+Get an Exa API key from the [Exa dashboard](https://dashboard.exa.ai/api-keys) or a Brave Search API key from the [Brave Search API dashboard](https://api-dashboard.search.brave.com/). If both keys are available, `agent_browser_web_search` prefers Exa by default because its `/search` endpoint returns token-efficient highlights and agent-oriented search modes; set `webSearch.preferredProvider` to `"brave"` when Brave Search is preferred. You can also disable this package's search tool with `webSearch.enabled: false` when another search tool should win. Config merges global → project → `PI_AGENT_BROWSER_CONFIG` override, so `enabled` is read from the final loaded config: a global disable can be re-enabled by project or override config, while an override file with `enabled: false` is the highest-priority hard disable for that run. Globally installed or CLI-loaded copies read project-local config under `.pi/config/...` when Pi's native trust decision permits it, and skip that layer when the project is untrusted or Pi is launched with `--no-approve`.
 
 `pi install npm:pi-agent-browser-native` loads the extension, but it does **not** usually put the package helper on your shell `PATH`. The clearest setup is to write the config file directly and keep actual keys in the environment that launches `pi`:
 

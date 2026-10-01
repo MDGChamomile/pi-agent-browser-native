@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- Require Pi 1.0.0 or newer; Node 24.21.0 and separately installed upstream `agent-browser` requirements are unchanged. Pin the official development graph to 1.0.0 while retaining host-owned wildcard optional peers.
+- Remove Browser integration with dropped checkpoint and fork metadata/revision APIs. Keep stopped-copy legacy journal conversion, native save-on-close, browser/session replay and ownership-aware cleanup.
+
+### Changed
+
+- Use native `defaultActive: false` for the five advanced direct tools, retaining additive loader activation, explicit/defaultTools selections and the narrow official-1.0 initial-resume fallback.
+- Return canonical native `isError` and prose failure notices directly, without a result-repair hook; preserve explicit parseable JSON. Add native namespace/output-schema metadata and bounded redacted structured observations, loader inventory and normalized search results without exposing internal replay state or replacing the Browser code VM.
+- Skip irrelevant tool-event policy work; keep raw latest-user policy fresh through message completion and native content replacement. Reuse validated capture-local admission prefixes and one queued replay/launch-configuration fold, preserving publication checks and captured-leaf correctness. Skip unchanged per-row TUI formatting and text updates.
+- Replace the fork-only checkpoint CI gate with portable Native lifecycle Linux SDK qualification. Official/fork qualification remains independent; while the fork's `main` is below the supported Pi floor its lane emits a truthful unattempted-below-floor receipt and skips the fork build instead of resurrecting dropped APIs. Windows remains owner-waived, not passed.
+
 ## 0.8.3 - 2026-10-01
 
 ### Changed

@@ -15,13 +15,13 @@ import test from "node:test";
 import { Check } from "typebox/value";
 
 import { analyzeQaPresetResults, analyzeQaPresetTimeout, compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
+import { finalizeAgentBrowserFailure } from "../extensions/agent-browser/lib/pi-tool-rendering.js";
 import { compileAgentBrowserSemanticAction } from "../extensions/agent-browser/lib/input-modes/semantic-action.js";
 import {
 	createExtensionHarness,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
-	runExtensionEventResults,
 	withPatchedEnv,
 	writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
@@ -926,12 +926,8 @@ process.stdin.on("end", () => {
 				]);
 				assert.match(ambiguous.content[0]?.text ?? "", /page-error check could not be verified/);
 				assert.doesNotMatch(ambiguous.content[0]?.text ?? "", /QA preset passed|unchanged|1 page error\(s\)/);
-				const [patch] = await runExtensionEventResults<{ content?: Array<{ text?: string }>; isError?: boolean }>(
-					harness.handlers, "tool_result",
-					{ content: ambiguous.content, details: ambiguous.details, isError: false, toolName: "agent_browser" },
-				);
-				assert.equal(patch?.isError, true);
-				assert.match(patch?.content?.[0]?.text ?? "", /failureCategory: qa-failure; Pi tool isError: true/);
+				// Canonical failure projection: the returned result itself carries isError and the notice.
+				assert.match(ambiguous.content[0]?.text ?? "", /Result category: failure; failureCategory: qa-failure; Pi tool isError: true\./);
 
 				const disabled = await executeRegisteredTool(harness.tool, harness.ctx, { qa: { url: "https://example.test/", checkErrors: false } });
 				assert.equal((disabled.details?.qaPreset as { passed?: boolean } | undefined)?.passed, true);
@@ -1022,43 +1018,24 @@ process.stdin.on("end", () => {
 
 			assert.equal(result.isError, true);
 			assert.equal(result.details?.failureCategory, "qa-failure");
-			const [realPiFailurePatch] = await runExtensionEventResults<{ content?: Array<{ text?: string; type: string }>; isError?: boolean }>(
-				harness.handlers,
-				"tool_result",
-				{ content: result.content, details: result.details, isError: false, toolName: "agent_browser" },
-			);
-			assert.equal(realPiFailurePatch?.isError, true);
-			assert.match(realPiFailurePatch?.content?.[0]?.text ?? "", /Result category: failure; failureCategory: qa-failure; Pi tool isError: true\./);
+			assert.match(result.content[0]?.text ?? "", /Result category: failure; failureCategory: qa-failure; Pi tool isError: true\./);
 
 			const jsonFailureText = JSON.stringify({ error: "boom", success: false }, null, 2);
-			const [jsonFailurePatch] = await runExtensionEventResults<{ content?: Array<{ text?: string; type: string }>; isError?: boolean }>(
-				harness.handlers,
-				"tool_result",
-				{
-					content: [{ type: "text", text: jsonFailureText }],
-					details: { args: ["--json", "get", "url"], failureCategory: "upstream-error", resultCategory: "failure" },
-					input: { args: ["--json", "get", "url"] },
-					isError: false,
-					toolName: "agent_browser",
-				},
+			const jsonFinalized = finalizeAgentBrowserFailure(
+				{ content: [{ type: "text", text: jsonFailureText }], details: { args: ["--json", "get", "url"], failureCategory: "upstream-error", resultCategory: "failure" }, isError: false },
+				{ args: ["--json", "get", "url"] },
 			);
-			assert.equal(jsonFailurePatch?.isError, true);
-			assert.equal(jsonFailurePatch?.content, undefined);
+			assert.equal(jsonFinalized.isError, true);
+			assert.equal(jsonFinalized.content[0]?.type, "text");
+			assert.equal((jsonFinalized.content[0] as { text: string }).text, jsonFailureText);
 			assert.deepEqual(JSON.parse(jsonFailureText), { error: "boom", success: false });
 
-			const [proseJsonArgsFailurePatch] = await runExtensionEventResults<{ content?: Array<{ text?: string; type: string }>; isError?: boolean }>(
-				harness.handlers,
-				"tool_result",
-				{
-					content: [{ type: "text", text: "Wrapper validation failed before upstream JSON output was available." }],
-					details: { args: ["--json", "get", "url"], failureCategory: "validation-error", resultCategory: "failure" },
-					input: { args: ["--json", "get", "url"] },
-					isError: false,
-					toolName: "agent_browser",
-				},
+			const proseJsonArgsFinalized = finalizeAgentBrowserFailure(
+				{ content: [{ type: "text", text: "Wrapper validation failed before upstream JSON output was available." }], details: { args: ["--json", "get", "url"], failureCategory: "validation-error", resultCategory: "failure" }, isError: false },
+				{ args: ["--json", "get", "url"] },
 			);
-			assert.equal(proseJsonArgsFailurePatch?.isError, true);
-			assert.match(proseJsonArgsFailurePatch?.content?.[0]?.text ?? "", /Result category: failure; failureCategory: validation-error; Pi tool isError: true\./);
+			assert.equal(proseJsonArgsFinalized.isError, true);
+			assert.match((proseJsonArgsFinalized.content[0] as { text: string }).text, /Result category: failure; failureCategory: validation-error; Pi tool isError: true\./);
 
 			const managedSessionOutcome = result.details?.managedSessionOutcome as { sessionMode?: string; status?: string; succeeded?: boolean } | undefined;
 			assert.equal(managedSessionOutcome?.sessionMode, "fresh");

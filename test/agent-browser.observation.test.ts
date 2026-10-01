@@ -22,6 +22,7 @@ test("canonical JSON preserves array-valued page and code output", async () => {
 	assert.deepEqual(projectAgentBrowserObservation({ data }, true).data, data);
 	const rendered = await renderAgentBrowserObservation({ content: [], details: { data }, json: true, succeeded: true });
 	assert.deepEqual(JSON.parse(rendered.content.find(part => part.type === "text")!.text).data, data);
+	assert.deepEqual(rendered.structuredContent, { success: true, resultCategory: "success", data });
 });
 
 test("JSON observations retain exact recovery, failure category and artifact verification", () => {
@@ -67,17 +68,19 @@ test("oversized JSON and prose spill complete redacted recovery and data to a re
 	try {
 		const nextActions = [{ ...actions[0], params: { ...actions[0].params, stdin: "'" + "exact payload ".repeat(3000) + "'" } }];
 		for (const json of [true, false]) {
-			const rendered = await renderAgentBrowserObservation({ content: [{ type: "text", text: "x".repeat(40_000) }], details: { nextActions, failureCategory: "timeout", data: { requested: "z".repeat(40_000), password: "sensitive-value" }, artifactVerification: verification }, json, succeeded: false, persistentArtifactStore: { sessionDir: dir, sessionId: "bounded" } });
+			const requestedActions = json ? nextActions : actions;
+			const rendered = await renderAgentBrowserObservation({ content: [{ type: "text", text: "Brief preview." }], details: { nextActions: requestedActions, failureCategory: "timeout", data: { requested: "z".repeat(40_000), password: "sensitive-value" }, artifactVerification: verification }, json, succeeded: false, persistentArtifactStore: { sessionDir: dir, sessionId: "bounded" } });
 			const text = rendered.content[0].type === "text" ? rendered.content[0].text : "";
 			assert.ok(text.length <= OBSERVATION_INLINE_MAX_CHARS);
 			const payload = JSON.parse(json ? text : text.slice(text.indexOf("{")));
+			assert.deepEqual(rendered.structuredContent, payload, "native callers receive the same bounded complete-spill envelope");
 			assert.equal(payload.success, false);
 			assert.equal(payload.failureCategory, "timeout");
 			assert.deepEqual(payload.artifactVerification, verification);
-			assert.equal(payload.nextActions, undefined, "do not publish a truncated executable action");
+			assert.deepEqual(payload.nextActions, json ? undefined : actions, "keep exact actions or omit oversized actions; never truncate them");
 			const fullText = await readFile(payload.observationPath, "utf8");
 			const full = JSON.parse(fullText);
-			assert.deepEqual(full.nextActions, nextActions);
+			assert.deepEqual(full.nextActions, requestedActions);
 			assert.equal(full.data.requested.length, 40_000);
 			assert.equal(full.data.password, "[REDACTED]");
 			assert.doesNotMatch(fullText, /sensitive-value/);
@@ -87,6 +90,7 @@ test("oversized JSON and prose spill complete redacted recovery and data to a re
 		await writeFile(file, "occupied");
 		const failed = await renderAgentBrowserObservation({ content: [], details: { data: "x".repeat(50_000), nextActions: actions }, json: true, succeeded: true, persistentArtifactStore: { sessionDir: file, sessionId: "failed" } });
 		const failure = JSON.parse(failed.content[0].type === "text" ? failed.content[0].text : "");
+		assert.deepEqual(failed.structuredContent, failure);
 		assert.ok(failure.observationUnavailable);
 		assert.equal(failure.observationPath, undefined);
 		assert.deepEqual(failure.nextActions, actions);
@@ -201,4 +205,25 @@ test("geometry uses measured DPR and refuses scroll/frame/change or dimension gu
 	}
 	assert.equal(buildScreenshotGeometry({ capture: "viewport", pixels: { width: 2400, height: 1600 }, before: sample, after: { ...sample, scroll: { x: 0, y: 10 } } }).status, "unknown");
 	assert.equal(buildScreenshotGeometry({ capture: "viewport", pixels: { width: 1200, height: 800 }, before: sample, after: sample }).status, "unknown");
+});
+
+test("compaction keeps an inline diagnostic when summary is deduped against a large error, and preserveContent keeps caller text", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "piab-observation-"));
+	try {
+		const largeError = "E".repeat(20_000);
+		const details = { error: largeError, summary: largeError, failureCategory: "upstream-error" };
+		const compacted = await renderAgentBrowserObservation({ content: [{ type: "text", text: "Command failed." }], details, json: false, succeeded: false, persistentArtifactStore: { sessionDir: dir, sessionId: "dedupe" } });
+		const compact = compacted.structuredContent as { summary?: string; error?: string; compacted?: boolean; observationPath?: string };
+		assert.equal(compact.compacted, true);
+		assert.equal(compact.error, undefined, "oversized error itself stays out of the compact object");
+		assert.equal(compact.summary?.length, 700);
+		assert.ok(compact.summary === "E".repeat(699) + "…", "700-character error truncation survives the dedupe");
+		const full = JSON.parse(await readFile(compact.observationPath as string, "utf8"));
+		assert.equal(full.error, largeError);
+		const preserved = await renderAgentBrowserObservation({ content: [{ type: "text", text: "Formatted caller output." }], details, json: false, succeeded: false, preserveContent: true, persistentArtifactStore: { sessionDir: dir, sessionId: "preserve" } });
+		const preservedText = preserved.content[0].type === "text" ? preserved.content[0].text : "";
+		assert.equal(preservedText, "Formatted caller output.");
+		assert.doesNotMatch(preservedText, /Browser observation compacted/);
+		assert.equal((preserved.structuredContent as { compacted?: boolean }).compacted, true);
+	} finally { await rm(dir, { recursive: true, force: true }); }
 });

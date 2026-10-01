@@ -7,9 +7,10 @@ import {
 } from "../../temp.js";
 import { buildEvictedSessionArtifactEntries } from "../artifact-manifest.js";
 import type { ArtifactStorageScope, SessionArtifactManifest, SessionArtifactManifestEntry, ToolPresentation } from "../contracts.js";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import { countLines, truncateText } from "../text.js";
 import { applyArtifactManifest } from "./artifacts.js";
-import { getPresentationText, projectAgentBrowserObservation } from "./content.js";
+import { getPresentationText, projectAgentBrowserObservation, OBSERVATION_INLINE_MAX_CHARS } from "./content.js";
 import { redactModelFacingText, stringifyModelFacing } from "./common.js";
 
 const LARGE_OUTPUT_INLINE_MAX_CHARS = 8_000;
@@ -120,7 +121,7 @@ function buildSpillArtifactEntries(options: {
 	];
 }
 
-export const OBSERVATION_INLINE_MAX_CHARS = 16_000;
+export { OBSERVATION_INLINE_MAX_CHARS } from "./content.js";
 
 /** Bound the final model-visible result, after recovery/diagnostic assembly. Never truncate executable actions. */
 export async function renderAgentBrowserObservation(options: {
@@ -128,16 +129,19 @@ export async function renderAgentBrowserObservation(options: {
 	details: Record<string, unknown>;
 	json: boolean;
 	succeeded: boolean;
+	/** Keep the caller's exact visible text; bound only the structured field and spill the complete observation. */
+	preserveContent?: boolean;
 	persistentArtifactStore?: PersistentSessionArtifactStore;
 	withArtifactWrite?: <T>(write: () => Promise<T>) => Promise<T>;
-}): Promise<{ content: ToolPresentation["content"]; artifactManifest?: SessionArtifactManifest }> {
+}): Promise<{ content: ToolPresentation["content"]; artifactManifest?: SessionArtifactManifest; structuredContent: JsonValue }> {
 	const observation = projectAgentBrowserObservation(options.details, options.succeeded);
+	let structuredContent: Record<string, unknown> = observation;
 	const images = options.content.filter(part => part.type === "image");
 	const prose = options.content.filter(part => part.type === "text").map(part => part.text).join("\n\n");
 	const { data: _data, error: _error, summary: _summary, ...metadata } = observation;
 	let text = options.json ? JSON.stringify(observation, null, 2) : `${prose}\n\nObservation: ${JSON.stringify(metadata)}`;
 	let artifactManifest = options.details.artifactManifest as SessionArtifactManifest | undefined;
-	if (text.length > OBSERVATION_INLINE_MAX_CHARS) {
+	if (text.length > OBSERVATION_INLINE_MAX_CHARS || JSON.stringify(observation).length > OBSERVATION_INLINE_MAX_CHARS) {
 		let spill: LargeOutputSpillWriteResult | undefined;
 		let spillError: string | undefined;
 		try {
@@ -153,7 +157,8 @@ export async function renderAgentBrowserObservation(options: {
 		const compact: Record<string, unknown> = {
 			success: options.succeeded, resultCategory: observation.resultCategory,
 			failureCategory: observation.failureCategory, successCategory: observation.successCategory,
-			summary: typeof observation.summary === "string" ? truncateText(observation.summary, 700) : undefined,
+			summary: typeof observation.summary === "string" ? truncateText(observation.summary, 700)
+				: typeof observation.error === "string" ? truncateText(observation.error, 700) : undefined,
 			compacted: true,
 			...(spill ? { observationPath: spill.path, retrieve: "Read observationPath for the complete redacted observation, including exact recovery actions and requested data." }
 				: { observationUnavailable: truncateText(redactModelFacingText(spillError ?? "Spill could not be written; request a smaller result."), 1_000) }),
@@ -161,10 +166,11 @@ export async function renderAgentBrowserObservation(options: {
 		for (const key of ["sessionName", "namespace", "codeRun", "error", "failures", "nextActions", "artifactVerification", "imageObservations", "data", "fullOutputPath", "fullOutputPaths"]) {
 			if (observation[key] !== undefined && JSON.stringify({ ...compact, [key]: observation[key] }, null, 2).length <= OBSERVATION_INLINE_MAX_CHARS - 500) compact[key] = observation[key];
 		}
-		text = JSON.stringify(compact, null, 2);
-		if (!options.json) text = `Browser observation compacted.\n${text}`;
+		structuredContent = compact;
+		if (options.preserveContent) text = prose;
+		else { text = JSON.stringify(compact, null, 2); if (!options.json) text = `Browser observation compacted.\n${text}`; }
 	}
-	return { content: [{ type: "text", text }, ...images], artifactManifest };
+	return { content: [{ type: "text", text }, ...images], artifactManifest, structuredContent: JSON.parse(JSON.stringify(structuredContent)) as JsonValue };
 }
 
 export async function compactLargePresentationOutput(options: {

@@ -68,6 +68,36 @@ jobs:
           ref: main
           path: pi-host
           persist-credentials: false
+      - name: Check the fork against the supported Pi floor
+        id: fork_floor
+        working-directory: pi-host
+        env:
+          PI_FORK_REF: ${{ steps.fork.outputs.commit }}
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { appendFileSync } from "node:fs";
+            import { MINIMUM_PI_VERSION, versionAtLeast } from "../extension/scripts/doctor.mjs";
+            const forkVersion = JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8")).version;
+            const forkRef = process.env.PI_FORK_REF;
+            if (!versionAtLeast(forkVersion, MINIMUM_PI_VERSION)) {
+              const receipt = {
+                check: "Fork Pi / Node 24",
+                forkRef,
+                forkVersion,
+                minimumPiVersion: MINIMUM_PI_VERSION,
+                status: "unattempted-below-floor",
+                note: `Fork main ${forkRef} reports Pi ${forkVersion}, below the supported ${MINIMUM_PI_VERSION} floor. Fork qualification is UNATTEMPTED for this run; the full supported-fork build and qualification path runs unchanged once the fork reaches the floor. No dropped fork APIs are resurrected for this check.`,
+              };
+              const line = JSON.stringify(receipt, null, 2);
+              console.log(line);
+              if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, "### Fork Pi / Node 24 — qualification unattempted (below floor)\n```json\n" + line + "\n```\n");
+              appendFileSync(process.env.GITHUB_OUTPUT, "supported=false\n");
+            } else {
+              console.log(`Fork main ${forkRef} reports Pi ${forkVersion} >= ${MINIMUM_PI_VERSION}; running the full supported-fork qualification.`);
+              appendFileSync(process.env.GITHUB_OUTPUT, "supported=true\n");
+            }
+          '
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.21.0'
@@ -75,6 +105,7 @@ jobs:
       - name: Use the package npm version
         run: npm install --global "$(node -p 'require("./extension/package.json").packageManager')"
       - name: Build the current fork packages
+        if: steps.fork_floor.outputs.supported == 'true'
         working-directory: pi-host
         env:
           PI_FORK_REF: ${{ steps.fork.outputs.commit }}
@@ -86,6 +117,7 @@ jobs:
           node ../automation/scripts/pack-fork.mjs . "$RUNNER_TEMP/fork-package" "$PI_FORK_REF"
           git diff --exit-code
       - name: Qualify the installed fork graph
+        if: steps.fork_floor.outputs.supported == 'true'
         working-directory: extension
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"

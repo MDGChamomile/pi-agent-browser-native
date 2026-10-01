@@ -7,7 +7,7 @@ import { InMemoryCredentialStore, normalizeContext, validateToolArguments, type 
 import { stream as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
 import {
 	createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession, type ExtensionContext,
+	type AgentSession, type AgentToolResult, type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { JsonSchema } from "../extensions/agent-browser/lib/json-schema.js";
 import { AGENT_BROWSER_ACTION_PARAMS, AGENT_BROWSER_QA_PARAMS } from "../extensions/agent-browser/lib/input-modes/params.js";
@@ -18,14 +18,14 @@ import { registerAgentBrowserToolSurface } from "../extensions/agent-browser/lib
 async function withSurface(
 	run: (fixture: {
 		session: AgentSession;
-		call: (name: string, input: JsonObject) => Promise<{ content: unknown; details?: unknown }>;
+		call: (name: string, input: JsonObject) => Promise<AgentToolResult<unknown>>;
 		active: () => string[];
 		all: () => string[];
 		calls: AgentBrowserExecuteParams[];
 		codeCalls: unknown[];
 		reload: () => Promise<void>;
 	}) => Promise<void>,
-	options: { tools?: string[]; sessionManager?: SessionManager } = {},
+	options: { tools?: string[]; defaultTools?: string[]; sessionManager?: SessionManager; result?: AgentToolResult<unknown> } = {},
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "piab-tool-surface-"));
 	const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false, credentials: new InMemoryCredentialStore(), modelsPath: null });
@@ -42,9 +42,9 @@ async function withSurface(
 					assert.equal(ctx, context);
 					calls.push(params);
 					const resolved = resolveAgentBrowserInput({ params, getBatchPreflightValidationError: () => undefined });
-					return { content: [{ type: "text", text: resolved.status }], details: { resolved } };
+					return options.result ?? { content: [{ type: "text", text: resolved.status }], details: { resolved } };
 				},
-				async executeCode(_id, params) { codeCalls.push(params); return { content: [], details: {} }; },
+				async executeCode(_id, params) { codeCalls.push(params); return options.result ?? { content: [], details: {} }; },
 			});
 			pi.on("session_start", (_event, ctx) => { context = ctx; });
 		}],
@@ -53,8 +53,8 @@ async function withSurface(
 		await resourceLoader.reload();
 		assert.deepEqual(resourceLoader.getExtensions().errors, []);
 		const { session } = await createAgentSession({
-			cwd: directory, modelRuntime, resourceLoader, noTools: "builtin", tools: options.tools,
-			settingsManager: SettingsManager.inMemory(), sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
+			cwd: directory, modelRuntime, resourceLoader, noTools: options.defaultTools ? undefined : "builtin", tools: options.tools,
+			settingsManager: SettingsManager.inMemory(options.defaultTools ? { defaultTools: options.defaultTools } : {}), sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
 		});
 		try {
 			await session.bindExtensions({ onError: (error) => { throw new Error(error.error); } });
@@ -125,19 +125,81 @@ test("registered browser code serializes for Anthropic while Pi still rejects in
 });
 
 test("native Pi registration keeps advanced tools discoverable and activation additive", async () => {
-	await withSurface(async ({ call, active, all }) => {
+	await withSurface(async ({ call, active, all, session }) => {
 		assert.deepEqual(all().filter((name) => name.startsWith("agent_browser")).sort(), ["agent_browser", "agent_browser_action", "agent_browser_code", "agent_browser_electron", "agent_browser_network_source", "agent_browser_qa", "agent_browser_source", "agent_browser_tools"]);
 		assert.deepEqual(active().sort(), [...baseTools].sort());
+		assert.equal(session.getCallableToolNames().includes("agent_browser_qa"), false);
 		const inventory = await call("agent_browser_tools", {});
 		assert.match(JSON.stringify(inventory.content), /agent_browser_network_source.*inactive/);
 		assert.deepEqual(active().sort(), [...baseTools].sort());
 		const loaded = await call("agent_browser_tools", { enable: ["qa", "action", "qa"] });
 		assert.deepEqual((loaded.details as { added: string[] }).added, ["agent_browser_qa", "agent_browser_action"]);
+		assert.deepEqual(loaded.structuredContent, loaded.details);
+		assert.equal(session.getCallableToolNames().includes("agent_browser_qa"), true);
 		assert.deepEqual(active().sort(), [...baseTools, "agent_browser_action", "agent_browser_qa"].sort());
 		await call("agent_browser_tools", { enable: ["electron"] });
 		assert.ok(active().includes("agent_browser_qa"));
 		assert.ok(active().includes("unrelated"));
 	});
+});
+
+test("native defaultTools survives startup and initial resume restoration is additive", async () => {
+	const manager = SessionManager.inMemory();
+	manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [
+		{ name: "agent_browser_action", description: "Action", parameters: AGENT_BROWSER_ACTION_PARAMS },
+	] });
+	for (const sessionManager of [undefined, manager]) {
+		await withSurface(async ({ active, reload }) => {
+			const expected = [...baseTools, "agent_browser_qa", ...(sessionManager ? ["agent_browser_action"] : [])].sort();
+			assert.deepEqual(active().sort(), expected);
+			await reload();
+			assert.deepEqual(active().sort(), expected);
+		}, { defaultTools: ["agent_browser", "agent_browser_qa"], sessionManager });
+	}
+});
+
+test("public returns classify failure without a result hook and preserve JSON, images, and redacted recovery", async () => {
+	const image = { type: "image" as const, mimeType: "image/png", data: "verified-inline-fixture" };
+	const details = {
+		resultCategory: "failure", failureCategory: "qa-failure",
+		data: { password: "do-not-expose", requested: 42 },
+		refSnapshot: { internal: "replay-only" },
+		nextActions: [{ id: "inspect", tool: "agent_browser", params: { args: ["get", "url"] }, reason: "Inspect before retrying." }],
+	};
+	const cases: { name: string; input: JsonObject; json: boolean }[] = [
+		{ name: "agent_browser", input: { args: ["get", "url"] }, json: false },
+		{ name: "agent_browser", input: { args: ["get", "url", "--json"] }, json: true },
+		{ name: "agent_browser_code", input: { code: "emit(42)" }, json: true },
+		{ name: "agent_browser_qa", input: { attached: true }, json: false },
+	];
+	for (const { name, input, json } of cases) {
+		await withSurface(async ({ call, session }) => {
+			const result = await call(name, input);
+			assert.equal(result.isError, true);
+			assert.deepEqual(result.content.filter(item => item.type === "image"), [image]);
+			const text = result.content.find(item => item.type === "text")!.text;
+			if (json) assert.deepEqual(JSON.parse(text), { success: false, data: 42 });
+			else assert.match(text, /Result category: failure; failureCategory: qa-failure; Pi tool isError: true/);
+			const observation = result.structuredContent as JsonObject;
+			assert.equal(observation.success, false);
+			assert.deepEqual(observation.data, { password: "[REDACTED]", requested: 42 });
+			assert.deepEqual(observation.nextActions, details.nextActions);
+			assert.equal(observation.refSnapshot, undefined);
+			const tool = session.getToolDefinition(name)!;
+			validateToolArguments({ ...tool, parameters: tool.outputSchema! }, { type: "toolCall", id: "output", name, arguments: observation });
+			assert.equal(tool.namespace?.name, "browser");
+		}, { result: { content: [{ type: "text", text: json ? '{"success":false,"data":42}' : "QA failed." }, image], details } });
+	}
+});
+
+test("export failures cannot retain a stale successful structured result", async () => {
+	await withSurface(async ({ call }) => {
+		const result = await call("agent_browser", { args: ["get", "url"], outputPath: "failed.json" });
+		assert.equal(result.isError, true);
+		assert.deepEqual(result.structuredContent, { success: false, resultCategory: "failure", error: "Output file failed.", failureCategory: "upstream-error" });
+	}, { result: { content: [{ type: "text", text: "Output file failed." }], isError: true,
+		details: { resultCategory: "failure", failureCategory: "upstream-error", error: "Output file failed." },
+		structuredContent: { success: true, resultCategory: "success", data: "stale" } } });
 });
 
 test("advanced wrappers normalize into one executor while code keeps explicit identity", async () => {

@@ -1,4 +1,4 @@
-name: Native checkpoint
+name: Native lifecycle
 
 on:
   pull_request:
@@ -9,12 +9,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-checkpoint-${{ github.workflow }}-${{ github.ref }}
+  group: native-lifecycle-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  native-checkpoint-linux:
-    name: Native checkpoint Linux
+  native-lifecycle-linux:
+    name: Native lifecycle Linux
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     defaults:
@@ -25,13 +25,6 @@ jobs:
         with:
           path: extension
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        id: fork
-        with:
-          repository: fitchmultz/pi
-          ref: main
-          path: pi-host
           persist-credentials: false
       - name: Install system prerequisites
         run: |
@@ -51,20 +44,18 @@ jobs:
           root=$(mktemp -d /tmp/piab-ci.XXXXXX)
           echo "CI_ROOT=$root" >> "$GITHUB_ENV"
           echo "CI_NODE_BIN=$(dirname "$(command -v node)")" >> "$GITHUB_ENV"
-          cp -a extension pi-host "$root/"
+          cp -a extension "$root/"
           mkdir -m 700 "$root/home"
       - name: Build current native fixture host and download stock browser
-        env:
-          PI_FORK_REF: ${{ steps.fork.outputs.commit }}
         run: |
-          env -i HOME="$CI_ROOT/home" TMPDIR=/tmp PI_FORK_REF="$PI_FORK_REF" \
+          env -i HOME="$CI_ROOT/home" TMPDIR=/tmp \
             PATH="$CI_NODE_BIN:/usr/local/bin:/usr/bin:/bin" \
-            bash "$CI_ROOT/extension/scripts/ci-native-checkpoint.sh" setup "$CI_ROOT"
+            bash "$CI_ROOT/extension/scripts/ci-native-lifecycle.sh" setup "$CI_ROOT"
       - name: Allow the fixture Chrome to create its sandbox
         run: |
           # Chromium's documented Ubuntu 23.10+ filepath exception (option 2):
           # https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md
-          # The native fixture copies the download into /tmp/piab-cp-*/home.
+          # The native fixture copies the download into /tmp/piab-lc-*/home.
           # Keep that short socket root and Chrome's sandbox; do not relax userns globally.
           apparmor_parser --version
           sysctl kernel.apparmor_restrict_unprivileged_userns
@@ -73,13 +64,13 @@ jobs:
           sudo tee "$CI_ROOT/logs/chrome.apparmor" <<EOF
           abi <abi/4.0>,
           include <tunables/global>
-          profile $(basename "$CI_ROOT")-chrome /tmp/piab-cp-*/home/.agent-browser/browsers/chrome-*/chrome flags=(unconfined) {
+          profile $(basename "$CI_ROOT")-chrome /tmp/piab-lc-*/home/.agent-browser/browsers/chrome-*/chrome flags=(unconfined) {
             userns,
           }
           EOF
           # Load only our ephemeral profile, without reloading host policy or caching it.
           sudo apparmor_parser --add --skip-cache "$CI_ROOT/logs/chrome.apparmor"
-      - name: Documentation drift and all 13 native browser checkpoints (loopback only)
+      - name: Documentation drift and native browser lifecycle (loopback only)
         run: |
           # Root only creates a loopback-only namespace, then drops all privileges.
           sudo unshare --net -- bash -c '
@@ -87,7 +78,7 @@ jobs:
             ip link set lo up
             exec setpriv --reuid="$1" --regid="$2" --clear-groups \
               env -i HOME="$3/home" TMPDIR=/tmp PATH="$4:/usr/local/bin:/usr/bin:/bin" \
-              bash "$3/extension/scripts/ci-native-checkpoint.sh" verify "$3"
+              bash "$3/extension/scripts/ci-native-lifecycle.sh" verify "$3"
           ' -- "$(id -u)" "$(id -g)" "$CI_ROOT" "$CI_NODE_BIN"
       - name: Remove only the fixture AppArmor profile
         if: always() && env.CI_ROOT != ''

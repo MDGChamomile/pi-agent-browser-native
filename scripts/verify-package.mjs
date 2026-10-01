@@ -562,12 +562,6 @@ export async function verifyPackagedPiLoad(options = {}) {
 			);
 			failures.push(...executionReport.failures);
 			invocation = executionReport.invocation;
-			if (process.env.PI_COMPAT_HOST === "fork") {
-				assert.equal(typeof session.acquireCheckpoint, "function", "fork checkpoint hook is required");
-				const hold = await session.acquireCheckpoint({ quiesce: () => () => {}, signal: AbortSignal.timeout(10_000) });
-				try { assert.equal(hold.sleepReady, true, JSON.stringify(hold.sleepBlockers)); }
-				finally { hold.release(); }
-			}
 			const marker = join(tempAgentDir, "cli.json");
 			const observer = join(tempAgentDir, "observer.ts");
 			await writeFile(observer, `import { writeFileSync } from "node:fs";

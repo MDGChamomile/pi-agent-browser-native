@@ -27,7 +27,6 @@ async function worker(options) {
  await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
  ({ session } = await sdk.createAgentSession({ cwd, agentDir, settingsManager, modelRuntime, resourceLoader: loader, sessionManager: sm, noTools: "builtin" }));
  await session.bindExtensions({ onError: e => { throw new Error(e.error); } });
- assert.equal(session.model, undefined);
  if (!options.journal) {
   // Journal materialization only; this marker contains no browser ownership.
   sm.appendMessage({ role: "assistant", content: [{ type: "text", text: "Model-free crash fixture." }], api: "openai-completions", provider: "fixture", model: "fixture", stopReason: "stop", timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
@@ -40,10 +39,6 @@ async function worker(options) {
     assert.equal((await session.navigateTree(params, { summarize: false })).cancelled, false);
     sm.appendMessage({ role: "user", content: "Branch B without browser work", timestamp: Date.now() });
     process.send(state());
-   } else if (action === "checkpoint") {
-    const hold = await session.acquireCheckpoint({ signal: AbortSignal.timeout(10_000), quiesce: () => () => {} });
-    try { process.send({ sleepReady: hold.sleepReady, sleepBlockers: hold.sleepBlockers, ...state() }); }
-    finally { hold.release(); }
    } else if (action === "reload") { await session.reload(); process.send(state()); }
    else if (action === "dispose") { session.dispose(); process.send(state()); process.disconnect(); }
   } catch (error) { process.send({ error: error.stack }); }
@@ -80,12 +75,6 @@ export async function qualifyOffbranchRouting(options) {
   for (let i = 0; i < 100 && status(identity).active; i++) await delay(50);
   assert.equal(status(identity).active, false);
  };
- const checkpoint = async (child, label, ready) => {
-  const value = await request(child, "checkpoint");
-  options.receipts.push({ label, ...value });
-  assert.equal(value.sleepReady, ready, JSON.stringify(value));
-  if (!ready) assert.match(value.sleepBlockers.join("\n"), /daemon/);
- };
  try {
   const first = await start();
   const opened = await call(first.child, { args: ["open", "about:blank"], sessionMode: "fresh" });
@@ -94,10 +83,9 @@ export async function qualifyOffbranchRouting(options) {
   const live = status(fresh);
   assert.equal(live.active, true); assert.equal(live.runtime.browserLaunched, true); assert.equal(live.runtime.pageCount, 1);
   assert.equal(status({ ...fresh, socketDir: ambient }).active, false);
-  await checkpoint(first.child, "owned before branch/crash", false);
   const branch = await request(first.child, "branch", first.state.leaf);
   assert.equal(branch.branch.includes(opened.leaf), false); assert.equal(branch.entries.includes(opened.leaf), true);
-  await checkpoint(first.child, "off-branch still runtime-owned", false);
+  assert.equal(status(fresh).pid, live.pid, "tree navigation must preserve the live daemon");
   const exited = once(first.child, "exit");
   first.child.kill("SIGKILL"); // Exact owned SDK PID only; never the daemon/process group.
   assert.deepEqual(await exited, [null, "SIGKILL"]);
@@ -107,11 +95,9 @@ export async function qualifyOffbranchRouting(options) {
   assert.notEqual(second.state.pid, first.state.pid); assert.equal(second.state.leaf, branch.leaf);
   assert.equal(second.state.branch.includes(opened.leaf), false); assert.equal(second.state.entries.includes(opened.leaf), true);
   options.receipts.push({ label: "real crash/reopen provenance", firstPiPid: first.state.pid, secondPiPid: second.state.pid, live, ambient: status({ ...fresh, socketDir: ambient }), actualOpenDetails: opened.result.details });
-  await checkpoint(second.child, "historical owned browser after abnormal restart", false);
   assert.equal(status(fresh).pid, live.pid);
   await request(second.child, "reload");
   assert.equal(status(fresh).pid, live.pid, "inspection must not acquire off-branch cleanup ownership");
-  await checkpoint(second.child, "historical browser survives ordinary reload", false);
 
   // One namespace/name can identify two native daemons in different socket roots.
   const sameCaller = { ...fresh, socketDir: ambient };
@@ -122,7 +108,6 @@ export async function qualifyOffbranchRouting(options) {
   assert.equal(sameLive.active, true); assert.notEqual(sameLive.pid, live.pid);
   assert.equal(status(fresh).pid, live.pid);
   options.receipts.push({ label: "same identity both roots live", owned: status(fresh), ambient: sameLive, callerLeaf: sameOpened.leaf, actualCallerDetails: sameOpened.result.details });
-  await checkpoint(second.child, "same identity both roots block", false);
   await request(second.child, "reload");
   assert.equal(status(fresh).pid, live.pid);
   assert.equal(status(sameCaller).pid, sameLive.pid, "inspection must not acquire caller cleanup ownership");
@@ -130,9 +115,7 @@ export async function qualifyOffbranchRouting(options) {
   await close(sameCaller);
   assert.equal(status(fresh).pid, live.pid);
   options.receipts.push({ label: "same identity caller closed only", owned: status(fresh), ambient: status(sameCaller) });
-  await checkpoint(second.child, "caller close must not hide historical owned daemon", false);
   await close(fresh);
-  await checkpoint(second.child, "historical daemon explicitly closed", true);
 
   // Exact wrapper base/fresh pattern is not provenance. Explicit fresh is still caller-owned.
   // The exact historical identity and another namespace must retain ambient routing too.
@@ -147,13 +130,10 @@ export async function qualifyOffbranchRouting(options) {
    const caller = status(identity); assert.equal(caller.active, true);
    assert.equal(status({ ...identity, socketDir: owned }).active, false);
    options.receipts.push({ label: "explicit caller provenance", ambient: caller, owned: status({ ...identity, socketDir: owned }), callerLeaf: callerOpened.leaf, actualCallerDetails: callerOpened.result.details });
-   await checkpoint(second.child, "explicit managed-looking caller retains ambient routing", false);
    await request(second.child, "reload");
    assert.equal(status(identity).pid, caller.pid);
-   await checkpoint(second.child, "caller survives reload without cleanup ownership", false);
    await call(second.child, { args: [...args, "close"] });
    await close(identity);
-   await checkpoint(second.child, "caller explicitly closed", true);
   }
   const done = once(second.child, "exit"); await request(second.child, "dispose"); assert.deepEqual(await done, [0, null]);
  } finally {

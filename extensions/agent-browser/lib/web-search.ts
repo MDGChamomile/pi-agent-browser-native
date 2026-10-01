@@ -1,4 +1,8 @@
 import { JsonSchema, type JsonSchemaBuilder } from "./json-schema.js";
+import { isRecord } from "./parsing.js";
+import { AGENT_BROWSER_NAMESPACE, AGENT_BROWSER_OUTPUT_SCHEMA, finalizeAgentBrowserNativeResult } from "./native-output.js";
+import { redactSensitiveText } from "./runtime.js";
+import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { StringEnum as localStringEnum, type StringEnumBuilder } from "./string-enum-schema.js";
 import {
 	DEFAULT_WEB_SEARCH_PROVIDER,
@@ -470,10 +474,10 @@ export function buildExaSearchRequestBody(params: {
 }, now: () => Date = () => new Date()): Record<string, unknown> {
 	const searchType = params.searchType ?? "auto";
 	if (params.additionalQueries?.length && !searchType.startsWith("deep")) {
-		throw new Error(`additionalQueries requires deep-lite, deep, or deep-reasoning; received ${searchType}.`);
+		throw new WebSearchLocalError(`additionalQueries requires deep-lite, deep, or deep-reasoning; received ${searchType}.`);
 	}
 	if ((params.category === "company" || params.category === "people") && (params.freshness || params.excludeDomains?.length)) {
-		throw new Error(`category ${params.category} cannot be combined with freshness or excludeDomains.`);
+		throw new WebSearchLocalError(`category ${params.category} cannot be combined with freshness or excludeDomains.`);
 	}
 	const body: Record<string, unknown> = {
 		query: params.query,
@@ -745,80 +749,97 @@ type AgentBrowserWebSearchParamsInput = {
 	searchType?: ExaSearchType;
 };
 
+/** Local validation/config failures, not provider outages; reported as `validation-error`. */
+class WebSearchLocalError extends Error {}
+
 export function createAgentBrowserWebSearchTool(
 	configState: AgentBrowserConfigState,
-	options: { loadConfigState?: (ctx: { cwd: string; isProjectTrusted?: () => boolean }) => AgentBrowserConfigState } = {},
+	options: { loadConfigState?: (ctx: { cwd: string; isProjectTrusted: () => boolean }) => AgentBrowserConfigState } = {},
 ) {
 	const requestGate = new WebSearchRequestGate();
 	return {
 		name: AGENT_BROWSER_WEB_SEARCH_TOOL_NAME,
+		namespace: AGENT_BROWSER_NAMESPACE,
+		outputSchema: AGENT_BROWSER_OUTPUT_SCHEMA,
 		label: "Agent Browser Web Search",
 		description: `Search the live web with Exa or Brave for current or external information. For Exa research tasks, use searchType deep-lite or deeper. Returns up to ${MAX_SEARCH_RESULT_COUNT} concise web results.`,
 		promptSnippet: "Search the live web with Exa or Brave for current or external information.",
 		parameters: AgentBrowserWebSearchParams,
-		async execute(_toolCallId: string, params: AgentBrowserWebSearchParamsInput, signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd: string; isProjectTrusted?: () => boolean }) {
-			const runtimeConfigState = ctx ? options.loadConfigState?.(ctx) ?? configState : configState;
-			if (runtimeConfigState.errors.length > 0) {
-				throw new Error(`agent_browser_web_search config is invalid: ${runtimeConfigState.errors.join("; ")}`);
-			}
-			if (!runtimeConfigState.webSearchEnabled) {
-				throw new Error("agent_browser_web_search is disabled by pi-agent-browser-native config.");
-			}
-			const requestedProvider = params.provider ?? "auto";
-			const resolved = await resolvePreferredWebSearchCredential(runtimeConfigState, { provider: requestedProvider, signal });
-			if (!resolved) throw new Error(buildMissingCredentialError(requestedProvider));
-			if (resolved.provider === "brave") {
-				const exaOnlyFields = [
-					params.includeDomains ? "includeDomains" : undefined,
-					params.excludeDomains ? "excludeDomains" : undefined,
-					params.category ? "category" : undefined,
-					params.additionalQueries ? "additionalQueries" : undefined,
-					params.highlightsDynamic ? "highlightsDynamic" : undefined,
-				].filter((field): field is string => Boolean(field));
-				if (exaOnlyFields.length > 0) {
-					throw new Error(`${exaOnlyFields.join(", ")} ${exaOnlyFields.length === 1 ? "requires" : "require"} provider exa; resolved provider was brave.`);
+		async execute(_toolCallId: string, params: AgentBrowserWebSearchParamsInput, signal?: AbortSignal, _onUpdate?: unknown, ctx?: { cwd: string; isProjectTrusted: () => boolean }): Promise<AgentToolResult<Record<string, unknown>>> {
+			try {
+				const runtimeConfigState = ctx ? options.loadConfigState?.(ctx) ?? configState : configState;
+				if (runtimeConfigState.errors.length > 0) {
+					throw new WebSearchLocalError(`agent_browser_web_search config is invalid: ${runtimeConfigState.errors.join("; ")}`);
 				}
+				if (!runtimeConfigState.webSearchEnabled) {
+					throw new WebSearchLocalError("agent_browser_web_search is disabled by pi-agent-browser-native config.");
+				}
+				const requestedProvider = params.provider ?? "auto";
+				const resolved = await resolvePreferredWebSearchCredential(runtimeConfigState, { provider: requestedProvider, signal });
+				if (!resolved) throw new WebSearchLocalError(buildMissingCredentialError(requestedProvider));
+				if (resolved.provider === "brave") {
+					const exaOnlyFields = [
+						params.includeDomains ? "includeDomains" : undefined,
+						params.excludeDomains ? "excludeDomains" : undefined,
+						params.category ? "category" : undefined,
+						params.additionalQueries ? "additionalQueries" : undefined,
+						params.highlightsDynamic ? "highlightsDynamic" : undefined,
+					].filter((field): field is string => Boolean(field));
+					if (exaOnlyFields.length > 0) {
+						throw new WebSearchLocalError(`${exaOnlyFields.join(", ")} ${exaOnlyFields.length === 1 ? "requires" : "require"} provider exa; resolved provider was brave.`);
+					}
+				}
+				const query = params.query.trim();
+				if (!query) throw new WebSearchLocalError("query must not be blank");
+				const count = Math.min(Math.max(params.count ?? DEFAULT_SEARCH_RESULT_COUNT, 1), MAX_SEARCH_RESULT_COUNT);
+				const offset = Math.max(params.offset ?? 0, 0);
+				const adapter = getWebSearchProviderAdapter(resolved.provider);
+				const executionParams: WebSearchExecutionParams = {
+					additionalQueries: params.additionalQueries,
+					category: params.category,
+					country: params.country,
+					count,
+					excludeDomains: params.excludeDomains,
+					freshness: params.freshness,
+					highlightsDynamic: params.highlightsDynamic,
+					includeDomains: params.includeDomains,
+					offset,
+					query,
+					safesearch: params.safesearch,
+					searchLang: params.searchLang,
+					searchType: params.searchType ?? runtimeConfigState.config.webSearch?.defaultSearchType ?? "auto",
+				};
+				const request = adapter.buildRequest(executionParams);
+				const data = await requestGate.run(signal, () => adapter.fetchJson(request, resolved.credential.value, signal));
+				const normalized = adapter.normalizeResponse(data, executionParams);
+				const results = dedupeSearchResults(normalized.results);
+				const duplicatesRemoved = normalized.results.length - results.length;
+				const details: WebSearchToolDetails = {
+					provider: adapter.provider,
+					query,
+					returnedQuery: normalized.returnedQuery,
+					count,
+					offset,
+					...normalized.extraDetails,
+					fetchedAt: new Date().toISOString(),
+					results,
+					duplicatesRemoved: duplicatesRemoved || undefined,
+				};
+				const result = await finalizeAgentBrowserNativeResult({
+					content: [{ type: "text" as const, text: `${formatSearchResults(adapter.provider, normalized.returnedQuery, results)}${duplicatesRemoved ? `\n\nDuplicate URLs removed: ${duplicatesRemoved}.` : ""}` }],
+					details: { data: details },
+				} as AgentToolResult<Record<string, unknown>>, params);
+				// Keep the finalized spill's invocation artifact receipt while flattening the documented search details shape.
+				const finalizedManifest = isRecord(result.details) ? result.details.artifactManifest : undefined;
+				return finalizedManifest === undefined ? { ...result, details } : { ...result, details: { ...details, artifactManifest: finalizedManifest } };
+			} catch (error) {
+				const message = redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(0, 1_000);
+				return finalizeAgentBrowserNativeResult({
+					content: [{ type: "text" as const, text: message }],
+					details: { error: message, resultCategory: "failure", failureCategory: signal?.aborted ? "aborted" : error instanceof WebSearchLocalError ? "validation-error" : "upstream-error" },
+					isError: true,
+				}, params);
 			}
-			const query = params.query.trim();
-			if (!query) throw new Error("query must not be blank");
-			const count = Math.min(Math.max(params.count ?? DEFAULT_SEARCH_RESULT_COUNT, 1), MAX_SEARCH_RESULT_COUNT);
-			const offset = Math.max(params.offset ?? 0, 0);
-			const adapter = getWebSearchProviderAdapter(resolved.provider);
-			const executionParams: WebSearchExecutionParams = {
-				additionalQueries: params.additionalQueries,
-				category: params.category,
-				country: params.country,
-				count,
-				excludeDomains: params.excludeDomains,
-				freshness: params.freshness,
-				highlightsDynamic: params.highlightsDynamic,
-				includeDomains: params.includeDomains,
-				offset,
-				query,
-				safesearch: params.safesearch,
-				searchLang: params.searchLang,
-				searchType: params.searchType ?? runtimeConfigState.config.webSearch?.defaultSearchType ?? "auto",
-			};
-			const request = adapter.buildRequest(executionParams);
-			const data = await requestGate.run(signal, () => adapter.fetchJson(request, resolved.credential.value, signal));
-			const normalized = adapter.normalizeResponse(data, executionParams);
-			const results = dedupeSearchResults(normalized.results);
-			const duplicatesRemoved = normalized.results.length - results.length;
-			const details: WebSearchToolDetails = {
-				provider: adapter.provider,
-				query,
-				returnedQuery: normalized.returnedQuery,
-				count,
-				offset,
-				...normalized.extraDetails,
-				fetchedAt: new Date().toISOString(),
-				results,
-				duplicatesRemoved: duplicatesRemoved || undefined,
-			};
-			return {
-				content: [{ type: "text" as const, text: `${formatSearchResults(adapter.provider, normalized.returnedQuery, results)}${duplicatesRemoved ? `\n\nDuplicate URLs removed: ${duplicatesRemoved}.` : ""}` }],
-				details,
-			};
 		},
 	};
 }
