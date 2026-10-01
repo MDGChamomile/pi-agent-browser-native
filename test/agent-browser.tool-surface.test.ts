@@ -237,6 +237,53 @@ test("prompt routing is compact and preserves browser authority, recovery, and i
 	}
 });
 
+test("Electron action schemas preserve field boundaries through native Pi validation", async () => {
+	await withSurface(async ({ call, calls }) => {
+		await call("agent_browser_electron", { action: "list", appPath: null, maxResults: null });
+		assert.deepEqual(calls.at(-1)?.electron, { action: "list" });
+		const fields: JsonObject = {
+			query: "Editor", maxResults: 3, appPath: "/Applications/Editor.app", appName: "Editor",
+			bundleId: "com.example.editor", executablePath: "/usr/bin/editor", appArgs: ["--test"],
+			handoff: "connect", targetType: "page", timeoutMs: 3000, allow: ["example.com"],
+			deny: ["blocked.example"], launchId: "launch-1", all: true, outputPath: "result.json",
+		};
+		const allowed: Record<string, string[]> = {
+			list: ["query", "maxResults", "outputPath"],
+			launch: ["appPath", "appName", "bundleId", "executablePath", "appArgs", "handoff", "targetType", "timeoutMs", "allow", "deny", "outputPath"],
+			status: ["launchId", "all", "timeoutMs", "outputPath"],
+			cleanup: ["launchId", "all", "timeoutMs", "outputPath"],
+			probe: ["launchId", "timeoutMs", "outputPath"],
+		};
+		for (const [action, names] of Object.entries(allowed)) {
+			await call("agent_browser_electron", { action });
+			for (const [field, value] of Object.entries(fields)) {
+				const input = { action, [field]: value };
+				if (names.includes(field)) {
+					await call("agent_browser_electron", input);
+				} else {
+					const before = calls.length;
+					await assert.rejects(call("agent_browser_electron", input), /Validation failed/);
+					assert.equal(calls.length, before, `${action}.${field} must not dispatch`);
+				}
+			}
+		}
+		const invalid: JsonObject[] = [
+			{ action: "status", launchId: "launch-1", all: true },
+			{ action: "cleanup", launchId: "launch-1", all: true },
+			{ action: "launch", timeoutMs: 0 },
+			{ action: "launch", handoff: "invalid" },
+			{ action: "list", maxResults: 0 },
+			{ action: "list", query: "" },
+			{ action: "unknown" },
+			{ action: "list", unknown: true },
+			{},
+		];
+		for (const input of invalid) {
+			await assert.rejects(call("agent_browser_electron", input), /Validation failed/);
+		}
+	});
+});
+
 test("every registered browser tool exposes an object-rooted parameter schema", async () => {
 	await withSurface(async ({ all, session }) => {
 		for (const name of all().filter((name) => name.startsWith("agent_browser"))) {

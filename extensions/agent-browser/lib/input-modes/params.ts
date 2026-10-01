@@ -166,13 +166,11 @@ export function createAgentBrowserQaParamsSchema(Type: JsonSchemaBuilder = JsonS
 export function createAgentBrowserElectronParamsSchema(Type: JsonSchemaBuilder = JsonSchema, StringEnum: StringEnumBuilder = localStringEnum) {
 	const common = { outputPath: outputProperties(Type).outputPath };
 	const timeoutMs = Type.Optional(Type.Integer({ minimum: 1 }));
-	// Providers that require an object-rooted JSON Schema (e.g. DeepSeek through a strict
-	// gateway) reject a bare `anyOf` union whose root has no `type`. Keep a top-level object
-	// and move the action-specific constraints into `anyOf`, mirroring the action/qa schemas.
-	return Type.Unsafe<AgentBrowserElectronParams>(Type.Object({
-		action: StringEnum(["list", "launch", "status", "cleanup", "probe"] as const),
+	const list = {
 		query: Type.Optional(Type.String({ description: "Case-insensitive app filter.", minLength: 1 })),
 		maxResults: Type.Optional(Type.Integer({ description: `Result cap; default ${ELECTRON_DISCOVERY_DEFAULT_MAX_RESULTS}, clamped to ${ELECTRON_DISCOVERY_MAX_RESULTS}.`, minimum: 1 })),
+	};
+	const launch = {
 		appPath: Type.Optional(Type.String({ description: "macOS .app path.", minLength: 1 })),
 		appName: Type.Optional(Type.String({ description: "Name from agent_browser_electron list.", minLength: 1 })),
 		bundleId: Type.Optional(Type.String({ minLength: 1 })),
@@ -183,16 +181,21 @@ export function createAgentBrowserElectronParamsSchema(Type: JsonSchemaBuilder =
 		timeoutMs,
 		allow: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 		deny: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-		launchId: Type.Optional(Type.String({ minLength: 1 })),
-		all: Type.Optional(Type.Literal(true)),
-		...common,
+	};
+	const probe = { launchId: Type.Optional(Type.String({ minLength: 1 })), timeoutMs };
+	const lifecycle = { ...probe, all: Type.Optional(Type.Literal(true)) };
+	// Strict providers need an object root; Pi needs root properties to normalize optional nulls.
+	// Each branch retains its original action-specific field boundary.
+	return Type.Unsafe<AgentBrowserElectronParams>(Type.Object({
+		action: StringEnum(["list", "launch", "status", "cleanup", "probe"] as const),
+		...list, ...launch, ...lifecycle, ...common,
 	}, {
 		additionalProperties: false,
 		anyOf: [
-			Type.Object({ action: StringEnum(["list"] as const) }),
-			Type.Object({ action: StringEnum(["launch"] as const) }),
-			Type.Object({ action: StringEnum(["status", "cleanup"] as const) }, { not: { required: ["launchId", "all"] } }),
-			Type.Object({ action: StringEnum(["probe"] as const) }),
+			Type.Object({ action: StringEnum(["list"] as const), ...list, ...common }, { additionalProperties: false }),
+			Type.Object({ action: StringEnum(["launch"] as const), ...launch, ...common }, { additionalProperties: false }),
+			Type.Object({ action: StringEnum(["status", "cleanup"] as const), ...lifecycle, ...common }, { additionalProperties: false, not: { required: ["launchId", "all"] } }),
+			Type.Object({ action: StringEnum(["probe"] as const), ...probe, ...common }, { additionalProperties: false }),
 		],
 	}));
 }
