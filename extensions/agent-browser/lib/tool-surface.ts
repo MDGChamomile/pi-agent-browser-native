@@ -152,12 +152,8 @@ export function registerAgentBrowserToolSurface(pi: ExtensionAPI, options: Agent
 		// A host-filtered catalog is an explicit selection, not our default surface.
 		const available = new Set(pi.getAllTools().map(({ name }) => name));
 		if (!["agent_browser", "agent_browser_code", "agent_browser_tools", ...advancedNames].every(name => available.has(name))) return;
-		// Fold Pi transcript tool deltas locally: Pi installs packages with peers
-		// omitted and native dynamic import() bypasses Pi's jiti alias for
-		// host-supplied "@earendil-works/pi-ai", so a runtime import of its
-		// getCurrentSystemMessage helper fails in consumer installs with
-		// "Cannot find package '@earendil-works/pi-ai'". Only tool identity
-		// matters here, so replay toolsAdded/toolsRemoved directly.
+		// Native dynamic imports bypass Pi's host-package aliases in consumer installs.
+		// Only tool names are needed; replay their native deltas without a host import.
 		const restored = new Set<string>();
 		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
 			if (message.role !== "system") continue;
