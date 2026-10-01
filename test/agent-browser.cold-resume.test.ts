@@ -43,7 +43,7 @@ let start = 0;
 while (args[start]?.startsWith('--')) start += args[start] === '--json' ? 1 : 2;
 const tokens = args.slice(start);
 function execute(tokens) {
-  if (tokens[0] === 'session') return tokens[1] === 'info' ? { active: state.active, runtime: state.active ? { restoreKey: state.restoreKey } : null } : { sessions: [] };
+  if (tokens[0] === 'session') return tokens[1] === 'info' ? { active: state.active, runtime: state.active ? { restoreKey: state.restoreKey, backgroundPid: process.ppid, socketDir: process.env.AGENT_BROWSER_SOCKET_DIR, browserLaunched: true } : null } : { sessions: [] };
   if (tokens[0] === 'close') { state = { active: false, url: 'about:blank', restoreKey: null }; return { closed: true }; }
   if (tokens[0] === 'read' && tokens.some((token) => token.startsWith('http:'))) return { content: 'Fetched page', source: 'http', url: tokens.at(-1) };
   if (!state.active) { state.active = true; state.restoreKey = process.env.AGENT_BROWSER_RESTORE ?? null; }
@@ -65,28 +65,35 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			PATH: `${root}${delimiter}${process.env.PATH ?? ""}`,
 			HOME: home,
 			USERPROFILE: home,
+			// Exercise enabled automatic restore on Windows as well as POSIX.
+			AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
 			AGENT_BROWSER_NAMESPACE: "",
 			AGENT_BROWSER_CONFIG: undefined,
 			PI_AGENT_BROWSER_SOCKET_DIR: join(root, "s"),
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: options.restoreDisabled ? "0" : undefined,
 			PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
-			const branch: unknown[] = [];
+			let branch: unknown[] = [];
 			const prefix = ["--namespace", "cold", ...(options.explicit ? ["--session", "caller"] : [])];
 			const first = createExtensionHarness({ branch, cwd });
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
+			let sessionName = "";
 			for (const args of [
 				[...prefix, ...(options.attached ? ["connect", "9222"] : ["open", url])],
 				...(options.attached ? [[...prefix, "get", "url"]] : []),
 				[...prefix, "snapshot", "-i"],
 			]) {
-				const result = await executeRegisteredTool(first.tool, first.ctx, { args });
+				const result = await executeRegisteredTool(first.tool, first.ctx, { args, ...(args.includes("open") ? { sessionMode: "fresh" as const } : {}) });
 				assert.equal(result.isError, false, result.content[0]?.text);
+				if (!sessionName) {
+					assert.equal(typeof result.details?.sessionName, "string");
+					sessionName = String(result.details?.sessionName);
+				}
 				branch.push(createToolBranchEntry({ details: result.details!, isError: result.isError }));
 			}
-			const sessionName = (branch[0] as { message: { details: { sessionName: string } } }).message.details.sessionName;
 			await runExtensionEvent(first.handlers, "session_shutdown", { reason: options.live ? "reload" : "quit" }, first.ctx);
-			const harness = createExtensionHarness({ branch: structuredClone(branch), cwd });
+			branch = structuredClone(first.ctx.sessionManager.getBranch());
+			const harness = createExtensionHarness({ branch, cwd });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 			await writeFile(logPath, "");
 			try {
@@ -158,7 +165,7 @@ test("cold resume preserves explicit navigation and sessionless intent", { concu
 });
 
 test("cold resume verifies the reopened page before a read and retains ref invalidation on failure", { concurrency: false }, async () => {
-	await withResumedPage(async ({ branch, harness, logPath, statePath }) => {
+	await withResumedPage(async ({ harness, logPath, statePath }) => {
 		const state = JSON.parse(await readFile(statePath, "utf8"));
 		await writeFile(statePath, JSON.stringify({ ...state, redirectUrl: "http://127.0.0.1:43210/unexpected" }));
 		const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "title"] });
@@ -167,7 +174,7 @@ test("cold resume verifies the reopened page before a read and retains ref inval
 		assert.equal(result.details?.failureCategory, "tab-drift");
 		assert.equal(result.details?.data, undefined);
 		assert.equal((result.details?.refSnapshotInvalidation as { reason?: string } | undefined)?.reason, "page-transition");
-		harness.setBranch([...branch, createToolBranchEntry({ details: result.details!, isError: true })]);
+		harness.setBranch(harness.ctx.sessionManager.getBranch().slice());
 		await runExtensionEvent(harness.handlers, "session_tree", {}, harness.ctx);
 		const stale = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "value", "@e1"] });
 		assert.equal(stale.details?.failureCategory, "stale-ref");

@@ -4,7 +4,8 @@
  * Scope: Test-only helpers for agent-browser extension validation.
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Theme } from "@earendil-works/pi-coding-agent";
@@ -36,6 +37,9 @@ const PLAIN_RENDER_FG_COLORS = {
 	mdQuote: "#ffffff",
 	mdQuoteBorder: "#ffffff",
 	muted: "#ffffff",
+	scrollbarTrack: "#ffffff",
+	scrollbarThumb: "#ffffff",
+	searchMatchText: "#ffffff",
 	success: "#ffffff",
 	syntaxComment: "#ffffff",
 	syntaxFunction: "#ffffff",
@@ -66,7 +70,7 @@ const PLAIN_RENDER_FG_COLORS = {
 
 const PLAIN_RENDER_BG_COLORS = {
 	customMessageBg: "#000000",
-	scrollbarThumb: "#000000",
+	searchMatchBg: "#000000",
 	selectedBg: "#000000",
 	toolErrorBg: "#000000",
 	toolPendingBg: "#000000",
@@ -232,6 +236,30 @@ export async function readOptionalFakeElectronLaunchLog(path: string): Promise<F
 	}
 }
 
+// A native executable plus an ordinary script operand exercises the real spawn,
+// argv, PID, stdio and cleanup boundaries on Windows too. The Electron evidence
+// is synthetic just as in the discovery fixtures; production validation is unchanged.
+export async function writeFakeElectronProcessApp(options: {
+	applicationsDir: string;
+	bundleId: string;
+	name: string;
+}): Promise<{ appPath: string; executablePath: string; scriptPath: string; appArgs: string[] }> {
+	let app: { appPath: string; executablePath: string };
+	if (process.platform === "win32") {
+		const directory = join(options.applicationsDir, options.name);
+		await mkdir(join(directory, "resources"), { recursive: true });
+		await writeFile(join(directory, "resources", "app.asar"), "asar");
+		await writeFile(join(directory, "resources.pak"), "pak");
+		const executablePath = join(directory, `${options.name}.exe`);
+		app = { appPath: executablePath, executablePath };
+	} else {
+		app = await writeFakeMacElectronApp(options);
+	}
+	await copyFile(process.execPath, app.executablePath, constants.COPYFILE_FICLONE);
+	const scriptPath = `${app.executablePath}.cjs`;
+	return { ...app, scriptPath, appArgs: [scriptPath] };
+}
+
 export async function writeFakeLaunchableElectronApp(options: {
 	applicationsDir: string;
 	bundleId: string;
@@ -240,10 +268,10 @@ export async function writeFakeLaunchableElectronApp(options: {
 	mode?: "invalid-cdp" | "no-port-file" | "normal";
 	name: string;
 	writeLaunchLog?: boolean;
-}): Promise<{ appPath: string; executablePath: string }> {
-	const app = await writeFakeMacElectronApp(options);
+}): Promise<Awaited<ReturnType<typeof writeFakeElectronProcessApp>>> {
+	const app = await writeFakeElectronProcessApp(options);
 	const mode = options.mode ?? "normal";
-	await writeFile(app.executablePath, `#!/usr/bin/env node
+	await writeFile(app.scriptPath, `#!/usr/bin/env node
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");

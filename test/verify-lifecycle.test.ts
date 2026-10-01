@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -177,6 +177,9 @@ test("parseJsonl and extraction helpers read agent_browser results and sentinel 
 		JSON.stringify({ type: "session", id: "piab-lifecycle-4242" }),
 		JSON.stringify({ type: "custom", customType: "piab-lifecycle-sentinel", data: { token: "v1" } }),
 		JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "agent_browser", details: { sessionName: "s1", fullOutputPath: "/tmp/a.txt" } } }),
+		JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "agent_browser_code", details: { sessionName: "s1" } } }),
+		JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "agent_browser_qa", details: { sessionName: "s1" } } }),
+		JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "agent_browser_tools" } }),
 		JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "bash", details: { fullOutputPath: "/tmp/ignored.txt" } } }),
 		JSON.stringify({ type: "custom", customType: "piab-lifecycle-sentinel", data: { token: "v2" } }),
 		"",
@@ -185,7 +188,7 @@ test("parseJsonl and extraction helpers read agent_browser results and sentinel 
 	assert.equal(sessionHeaderId(entries), "piab-lifecycle-4242");
 	assert.deepEqual(sentinelTokens(entries), ["v1", "v2"]);
 	const results = agentBrowserResults(entries);
-	assert.equal(results.length, 1);
+	assert.deepEqual(results.map(result => result.toolName), ["agent_browser", "agent_browser_code", "agent_browser_qa"]);
 	assert.equal(results[0]?.details?.sessionName, "s1");
 	assert.deepEqual(collectFullOutputPaths(results), ["/tmp/a.txt"]);
 });
@@ -276,7 +279,9 @@ test("lifecycle wait discovers the initial transcript for observed open validati
 			describe: "initial open", sessionDir: directory, timeoutMs: 2000, sinceCount: 0,
 			predicate: (result) => matchesSuccessfulPageResult(result, "open", "https://react.dev/"),
 		});
-		assert.equal(opened.sessionFile, sessionFile);
+		// Native find may return mixed separators; assert the discovered file's identity, not its spelling.
+		assert.equal(await realpath(opened.sessionFile), await realpath(sessionFile));
+		assert.equal(matchesSuccessfulPageResult(opened.result, "open", "https://react.dev/"), true);
 	} finally {
 		await rm(directory, { force: true, recursive: true });
 	}
@@ -313,17 +318,27 @@ test("parseJsonl reports malformed session transcript lines", () => {
 	assert.throws(() => parseJsonl('{"ok":true}\nnot-json'), /Invalid JSONL at line 2/);
 });
 
-test("injectLifecycleSentinelSource inserts and replaces deterministic command token", () => {
-	const source = 'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n\nexport default function agentBrowserExtension(pi: ExtensionAPI) {\n\tpi.registerTool({ name: "agent_browser" });\n}\n';
-	const v1 = injectLifecycleSentinelSource(source, "v1");
-	assert.match(v1, /registerCommand\("piab-lifecycle-sentinel-v1"/);
-	assert.match(v1, /token: "v1"/);
-
-	const v2 = injectLifecycleSentinelSource(v1, "v2");
-	assert.doesNotMatch(v2, /token: "v1"/);
-	assert.match(v2, /registerCommand\("piab-lifecycle-sentinel-v2"/);
-	assert.match(v2, /token: "v2"/);
-	assert.equal((v2.match(/PIAB_LIFECYCLE_SENTINEL_START/g) ?? []).length, 1);
+test("injectLifecycleSentinelSource inserts and replaces one command inside the compiled extension factory", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "piab-lifecycle-sentinel-"));
+	const checkPath = join(directory, "index.mjs");
+	try {
+		const source = await readFile(new URL("../dist/extensions/agent-browser/index.js", import.meta.url), "utf8");
+		const sentinelBlock = /\n\t\/\/ PIAB_LIFECYCLE_SENTINEL_START[\s\S]*?\n\t\/\/ PIAB_LIFECYCLE_SENTINEL_END\n/;
+		let injected = source;
+		for (const token of ["v1", "v2"]) {
+			injected = injectLifecycleSentinelSource(injected, token);
+			assert.match(injected, new RegExp(`pi\\.registerCommand\\("piab-lifecycle-sentinel-${token}"`));
+			assert.match(injected, new RegExp(`pi\\.appendEntry\\("piab-lifecycle-sentinel", \\{ token: "${token}" \\}\\);`));
+			assert.equal(injected.replace(sentinelBlock, ""), source);
+			assert.equal((injected.match(/PIAB_LIFECYCLE_SENTINEL_START/g) ?? []).length, 1);
+			assert.equal((injected.match(/PIAB_LIFECYCLE_SENTINEL_END/g) ?? []).length, 1);
+			await writeFile(checkPath, injected, "utf8");
+			await execFile(process.execPath, ["--check", checkPath]);
+		}
+		assert.doesNotMatch(injected, /piab-lifecycle-sentinel-v1|token: "v1"/);
+	} finally {
+		await rm(directory, { force: true, recursive: true });
+	}
 });
 
 test("injectLifecycleSentinelSource requires the extension factory marker", () => {

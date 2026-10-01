@@ -10,6 +10,7 @@ import { GLOBAL_BOOLEAN_FLAGS_WITH_OPTIONAL_VALUES, GLOBAL_VALUE_FLAGS, VALUE_FL
 import { TARGET_AGENT_BROWSER_VERSION } from "../scripts/agent-browser-target.mjs";
 import { getGuardedRefUsage, shouldPinSessionTabForCommand } from "../extensions/agent-browser/lib/orchestration/browser-run/session-state.js";
 import { getPageTargetValidationError } from "../extensions/agent-browser/lib/page-target-validation.js";
+import { ManagedSessionRestoreState, withOwnedManagedSessionContext } from "../extensions/agent-browser/lib/managed-session-restore.js";
 import { runAgentBrowserProcess } from "../extensions/agent-browser/lib/process.js";
 import type { AgentBrowserNextAction, FileArtifactMetadata } from "../extensions/agent-browser/lib/results/contracts.js";
 import { waitForTestPidExit } from "./helpers/extension-validation-fixtures.js";
@@ -167,32 +168,27 @@ test("real upstream artifact argv matches native operand selection", { skip: !re
 					assert.deepEqual(progress?.artifacts.map(({ path, exists }) => ({ path, exists })), [pdf, download, "--quick"].map((path) => ({ path, exists: true })));
 					await assert.rejects(stat(join(dir, "ignored-stdin.pdf")), { code: "ENOENT" });
 				});
-				for (const command of ["pdf", "screenshot"]) await t.test(`timeout retry preserves the native ${command} destination`, { skip: process.platform === "win32" }, async (retryTest) => {
+				for (const command of ["pdf", "screenshot"]) await t.test(`multi-step timeout leaves ${command} recovery to inspection`, { skip: process.platform === "win32" }, async (retryTest) => {
 					const ignored = `ignored-retry-${command}`;
 					const step = command === "pdf" ? [command, "--quick", ignored] : [command, "body", "--quick", ignored];
 					const path = join(dir, "--quick");
 					await rm(path, { force: true });
 					await symlink("missing/retry-output", path);
-					// A real filesystem failure leaves this row incomplete before the later wait times out.
+					// The row fails before the wait, but the watchdog receives no per-row outcome.
 					const timedOut = await call(["batch"], JSON.stringify([step, ["wait", "3000"]]), 1000);
 					assert.equal(timedOut.details?.timedOut, true, timedOut.content[0]?.text);
 					const retry = (timedOut.details?.nextActions as AgentBrowserNextAction[]).find((action) => action.id === "retry-timeout-step");
-					assert.ok(retry?.params);
+					assert.equal(retry, undefined);
+					assert.doesNotMatch(timedOut.content[0]?.text ?? "", /Retry candidate|Retry failed step/);
+					assert.deepEqual((timedOut.details?.timeoutPartialProgress as { steps: Array<{ status: string }> }).steps.map(step => step.status), ["unknown", "unknown"]);
 					await rm(path);
-					const retried = await executeRegisteredTool(h.tool, h.ctx, retry.params);
-					t.diagnostic(JSON.stringify({ step, retry: retry.params, retriedError: retried.isError, retriedPaths: (retried.details?.artifacts as FileArtifactMetadata[] | undefined)?.map((artifact) => artifact.path) }));
-					await retryTest.test("following nextActions writes the original path", async () => {
+					const retried = await call(["batch"], JSON.stringify([step]));
+					t.diagnostic(JSON.stringify({ step, retriedError: retried.isError, retriedPaths: (retried.details?.artifacts as FileArtifactMetadata[] | undefined)?.map((artifact) => artifact.path) }));
+					await retryTest.test("explicitly rerunning the original row preserves its native destination", async () => {
 						assert.equal(retried.isError, false, retried.content[0]?.text);
 						const bytes = await readFile(path);
 						assert.equal(command === "pdf" ? bytes.subarray(0, 5).toString() : bytes.subarray(0, 8).toString("hex"), command === "pdf" ? "%PDF-" : "89504e470d0a1a0a");
 						await assert.rejects(stat(join(dir, ignored)), { code: "ENOENT" });
-					});
-					await retryTest.test("visible retry and session-scoped action retain the same native row", () => {
-						const text = timedOut.content[0]?.text ?? "";
-						const payload = JSON.parse(text.split("\n").find((line) => line.startsWith("Retry failed step: "))?.slice("Retry failed step: ".length) ?? "null");
-						assert.deepEqual(payload, { args: ["batch"], stdin: JSON.stringify([step]) });
-						assert.deepEqual(retry.params, { args: [...prefix, "batch"], stdin: JSON.stringify([step]) });
-						assert.ok(text.includes(JSON.stringify(retry.params)));
 					});
 				});
 				await t.test("native recording reservations cover interleaved waits and literal batch paths", async (recording) => {
@@ -247,12 +243,13 @@ test("real upstream recording FPS preserves destinations and the intended page",
 			const call = (args: string[], stdin?: string, outputPath?: string) => executeRegisteredTool(h.tool, h.ctx, { args, stdin, outputPath });
 			let daemonPid: number | undefined;
 			try {
-				const opened = await call(["open", url]);
+				const opened = await executeRegisteredTool(h.tool, h.ctx, { args: ["open", url], sessionMode: "fresh" });
 				assert.equal(opened.isError, false, opened.content[0]?.text);
 				const sessionName = opened.details?.sessionName;
 				assert.ok(typeof sessionName === "string");
 				daemonPid = Number(await readFile(join(socketDir, `${sessionName}.pid`), "utf8"));
-				const direct = (args: string[]) => runAgentBrowserProcess({ args: ["--json", "--session", sessionName, ...args], cwd: dir });
+				const owned = { cwd: dir, sessionName, restoreState: new ManagedSessionRestoreState() };
+				const direct = (args: string[]) => withOwnedManagedSessionContext(owned, () => runAgentBrowserProcess({ args: ["--json", "--session", sessionName, ...args], cwd: dir }));
 				for (const mode of ["direct", "stdin", "raw"]) await t.test(`${mode} FPS outputPath collision stops before native recording`, async () => {
 					const path = join(dir, `preflight-${mode}.webm`);
 					const row = ["record", "start", "--fps", "12", path];
@@ -292,7 +289,7 @@ test("real upstream recording FPS preserves destinations and the intended page",
 					assert.equal(recording.isError, false, recording.content[0]?.text);
 					const observedUrl = JSON.parse((await direct(["get", "url"])).stdout).data.url;
 					await t.test(`${subcommand} FPS retains the declared native destination`, () => {
-						assert.equal((recording.details?.artifacts as FileArtifactMetadata[])[0]?.requestedPath, path);
+						assert.equal((recording.details?.artifacts as FileArtifactMetadata[]).find((artifact) => artifact.subcommand === subcommand)?.requestedPath, path);
 						assert.deepEqual((recording.details?.effectiveArgs as string[]).slice(-args.length), args);
 					});
 					await t.test(`${subcommand} FPS records the pinned page rather than the drifted tab`, () => assert.equal(observedUrl, url));
@@ -496,7 +493,8 @@ test("real upstream batch argv and ref fidelity for pinned and unpinned register
 						assert.equal(JSON.parse((await direct(["tab", "list"])).stdout).data.tabs.find((tab: { tabId: string }) => tab.tabId === duplicate).title, "Different tab");
 						const filled = await call(["fill", "#name-input", "intended"]);
 						assert.equal(filled.isError, false, JSON.stringify(filled));
-						assert.equal((filled.details?.sessionTabCorrection as { selectedTab: string } | undefined)?.selectedTab, original, JSON.stringify({ original, duplicate, originalTabs, duplicateTabs, filled }));
+						assert.equal((filled.details?.sessionTabCorrection as { selectedTab: string } | undefined)?.selectedTab, originalTab.targetId, JSON.stringify({ original, duplicate, originalTabs, duplicateTabs, filled }));
+						assert.equal((filled.details?.sessionTabCorrection as { selectionKind: string } | undefined)?.selectionKind, "targetId");
 						await direct(["tab", duplicate]);
 						assert.equal(JSON.parse((await direct(["get", "value", "#name-input"])).stdout).data.value, "");
 						await direct(["tab", original]);

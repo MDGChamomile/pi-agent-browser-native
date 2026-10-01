@@ -13,7 +13,8 @@ import {
 } from "../../managed-session-restore.js";
 import { isManagedSessionRestoreKey } from "../../managed-session-storage.js";
 import { isRecord } from "../../parsing.js";
-import { getAgentBrowserProcessEnvironment } from "../../process-environment.js";
+import { readProcessStartIdentity } from "../../process-identity.js";
+import { getAgentBrowserProcessEnvironment, withAgentBrowserProcessEnvironment } from "../../process-environment.js";
 import { runAgentBrowserProcess, withAttachedBrowserSessionContext } from "../../process.js";
 import { getAgentBrowserErrorText, parseAgentBrowserEnvelope } from "../../results/envelope.js";
 import { redactInvocationArgs } from "../../runtime.js";
@@ -34,11 +35,12 @@ function getHeadedManagedAutosaveEnv(interval: string | undefined): NodeJS.Proce
 }
 
 export type ManagedSessionDaemonInspection =
-	| { restoreKey: string | null; status: "active" }
+	| { restoreKey: string | null; status: "active"; generation?: string }
 	| { status: "inactive" | "missing-binary" | "unknown" };
 
 export async function inspectManagedSessionDaemon(options: {
 	cwd: string;
+	includeGeneration?: boolean;
 	headedManagedAutosaveInterval?: string;
 	namespace?: string;
 	preserveAttachedBrowserSession?: boolean;
@@ -62,8 +64,14 @@ export async function inspectManagedSessionDaemon(options: {
 		if (!isRecord(data) || typeof data.active !== "boolean") return { status: "unknown" };
 		if (!data.active) return { status: "inactive" };
 		if (!isRecord(data.runtime)) return { status: "unknown" };
-		if (typeof data.runtime.restoreKey === "string" && data.runtime.restoreKey.length > 0) return { restoreKey: data.runtime.restoreKey, status: "active" };
-		return data.runtime.restoreKey === null ? { restoreKey: null, status: "active" } : { status: "unknown" };
+		let generation: string | undefined;
+		if (options.includeGeneration && Number.isSafeInteger(data.runtime.backgroundPid) && Number(data.runtime.backgroundPid) > 0
+			&& typeof data.runtime.socketDir === "string" && data.runtime.browserLaunched !== false) {
+			const start = await readProcessStartIdentity(Number(data.runtime.backgroundPid), process.platform, { signal: options.signal, deadline: Date.now() + (options.timeoutMs ?? 5_000) });
+			if (start) generation = JSON.stringify({ pid: data.runtime.backgroundPid, start, socketDir: data.runtime.socketDir });
+		}
+		if (typeof data.runtime.restoreKey === "string" && data.runtime.restoreKey.length > 0) return { restoreKey: data.runtime.restoreKey, status: "active", generation };
+		return data.runtime.restoreKey === null ? { restoreKey: null, status: "active", generation } : { status: "unknown" };
 	} finally {
 		if (processResult.stdoutSpillPath) await rm(processResult.stdoutSpillPath, { force: true }).catch(() => undefined);
 	}
@@ -108,14 +116,21 @@ export async function acquireOwnedManagedSessionDaemonPolicy(options: {
 	}
 
 	try {
+		const receipt = context.restoreState.getDaemonReceipt(context.sessionName, context.namespace);
 		const daemon = await inspectManagedSessionDaemon({
 			cwd: context.cwd,
+			includeGeneration: receipt !== undefined && !context.restoreState.hasDaemonRestoreKey(context.sessionName, context.namespace),
 			headedManagedAutosaveInterval: context.headedManagedAutosaveInterval,
 			namespace: context.namespace,
 			sessionName: context.sessionName,
 			signal,
 		});
 		if (daemon.status === "inactive") context.restoreState.forgetDaemonRestoreKey(context.sessionName, context.namespace);
+		if (daemon.status === "active" && receipt && !context.restoreState.hasDaemonRestoreKey(context.sessionName, context.namespace)) {
+			if (daemon.generation === receipt.generation && daemon.restoreKey === receipt.restoreKey) {
+				context.restoreState.recordDaemonRestoreKey(context.sessionName, context.namespace, daemon.restoreKey, daemon.generation);
+			} else context.restoreState.forgetDaemonRestoreKey(context.sessionName, context.namespace);
+		}
 		if (options.mode === "close") {
 			if (daemon.status === "active") context.restoreState.recordDaemonRestoreKey(context.sessionName, context.namespace, daemon.restoreKey);
 			return { daemonStatus: daemon.status, lock };
@@ -168,10 +183,18 @@ export async function closeManagedSession(options: {
 	preserveAttachedBrowserSession?: boolean;
 	restoreState: ManagedSessionRestoreState;
 	sessionName: string;
+	socketDir?: string;
 	timeoutMs: number;
 }): Promise<string | undefined> {
+	return withAgentBrowserProcessEnvironment(options.socketDir ? { PI_AGENT_BROWSER_SOCKET_DIR: options.socketDir } : {}, async () => {
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+	let phase = "policy coordination";
+	let phaseStartedAt = Date.now();
+	let timeoutError: string | undefined;
+	const timer = setTimeout(() => {
+		timeoutError = `Managed-session cleanup timed out after ${options.timeoutMs} ms during ${phase} (${Date.now() - phaseStartedAt} ms in this phase).`;
+		controller.abort();
+	}, options.timeoutMs);
 	let stdoutSpillPath: string | undefined;
 	const closeArgs = [...(options.namespace !== undefined ? ["--namespace", options.namespace] : []), "--session", options.sessionName, "close"];
 	const policyLock = options.policyLock ?? await acquireManagedSessionPolicyLock({
@@ -182,9 +205,11 @@ export async function closeManagedSession(options: {
 	});
 	if (!policyLock) {
 		clearTimeout(timer);
-		return "Managed-session policy coordination is unavailable or busy; cleanup did not run. Retry after the current operation finishes or repair the private policy-lock directory.";
+		return timeoutError ?? "Managed-session policy coordination is unavailable or busy; cleanup did not run. Retry after the current operation finishes or repair the private policy-lock directory.";
 	}
 	try {
+		phase = "daemon inspection";
+		phaseStartedAt = Date.now();
 		const daemon = await inspectManagedSessionDaemon({
 			cwd: options.cwd,
 			headedManagedAutosaveInterval: options.headedManagedAutosaveInterval,
@@ -198,6 +223,8 @@ export async function closeManagedSession(options: {
 		const daemonRestoreKey = options.restoreState.getDaemonRestoreKey(options.sessionName, options.namespace);
 		const ownedRestoreKey = !options.restoreState.isDisabled(options.sessionName, options.namespace)
 			&& isManagedSessionRestoreKey(daemonRestoreKey) ? daemonRestoreKey : null;
+		phase = "native close";
+		phaseStartedAt = Date.now();
 		const processResult = await runAgentBrowserProcess({
 			args: closeArgs,
 			cwd: options.cwd,
@@ -207,6 +234,7 @@ export async function closeManagedSession(options: {
 			preserveAttachedBrowserSession: options.preserveAttachedBrowserSession,
 			signal: controller.signal,
 		});
+		clearTimeout(timer);
 		stdoutSpillPath = processResult.stdoutSpillPath;
 		if (!processResult.aborted && !processResult.spawnError && processResult.exitCode === 0) {
 			const parsed = await parseAgentBrowserEnvelope({ stdout: processResult.stdout, stdoutPath: processResult.stdoutSpillPath });
@@ -219,7 +247,7 @@ export async function closeManagedSession(options: {
 				statePath: typeof data?.statePath === "string" ? data.statePath : undefined,
 			});
 		}
-		return getAgentBrowserErrorText({
+		return timeoutError ?? getAgentBrowserErrorText({
 			aborted: processResult.aborted,
 			command: "close",
 			effectiveArgs: redactInvocationArgs(closeArgs),
@@ -231,10 +259,11 @@ export async function closeManagedSession(options: {
 			timeoutMs: processResult.timeoutMs,
 		});
 	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
+		return timeoutError ?? (error instanceof Error ? error.message : String(error));
 	} finally {
 		clearTimeout(timer);
 		if (stdoutSpillPath) await rm(stdoutSpillPath, { force: true }).catch(() => undefined);
 		if (!options.policyLock) await policyLock.release();
 	}
+	});
 }

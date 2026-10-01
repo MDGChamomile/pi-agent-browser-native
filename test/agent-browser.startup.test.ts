@@ -34,16 +34,17 @@ async function measureColdStartup(entrypoint: string): Promise<StartupMeasuremen
 const start = performance.now();
 const extension = await import(${JSON.stringify(entrypoint)});
 const imported = performance.now();
+const registeredEvents = [];
 const pi = {
-  events: [],
+  events: { on(...args) { registeredEvents.push(args); } },
   tools: [],
-  on(...args) { this.events.push(args); },
+  on(...args) { registeredEvents.push(args); },
   registerTool(tool) { this.tools.push(tool); },
 };
 extension.default(pi);
 const registered = performance.now();
 console.log(JSON.stringify({
-  events: pi.events.length,
+  events: registeredEvents.length,
   importMs: imported - start,
   tools: pi.tools.map((tool) => tool.name),
   totalMs: registered - start,
@@ -59,10 +60,10 @@ console.log(JSON.stringify({
 test("agent_browser cold startup stays below the issue #84 regression budget", async () => {
 	const entrypoint = await getPackageExtensionEntrypoint();
 	assert.equal(entrypoint, "./dist/extensions/agent-browser/index.js");
-	// Concurrent cold imports measure scheduler contention rather than one Pi startup on thermally constrained Android devices.
-	const measurements = process.platform === "android"
-		? [await measureColdStartup(entrypoint), await measureColdStartup(entrypoint), await measureColdStartup(entrypoint)]
-		: await Promise.all([measureColdStartup(entrypoint), measureColdStartup(entrypoint), measureColdStartup(entrypoint)]);
+	// Measure one cold Pi extension load at a time on every platform. Parallel
+	// samples compete for the hosted runner's CPU; each sample still imports in
+	// a fresh process and every result must meet the unchanged startup budget.
+	const measurements = [await measureColdStartup(entrypoint), await measureColdStartup(entrypoint), await measureColdStartup(entrypoint)];
 	const totals = measurements.map((measurement) => measurement.totalMs);
 	const maxTotal = Math.max(...totals);
 

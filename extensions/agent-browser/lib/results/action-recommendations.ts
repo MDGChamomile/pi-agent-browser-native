@@ -42,10 +42,10 @@ function buildElectronToolAction(options: {
 }): AgentBrowserNextAction {
 	return {
 		id: options.id,
-		params: { electron: { action: options.action, launchId: options.launchId } },
+		params: { action: options.action, launchId: options.launchId },
 		reason: options.reason,
 		...(options.safety ? { safety: options.safety } : {}),
-		tool: "agent_browser",
+		tool: "agent_browser_electron",
 	};
 }
 
@@ -240,6 +240,14 @@ export function buildAgentBrowserNextActions(options: {
 				break;
 			case "timeout":
 				{
+					if (options.command === "session" && options.subcommand === "info") {
+						actions.push(buildNextToolAction({
+							args: ["session", "info"],
+							id: "retry-session-info",
+							reason: "Retry the same session status check without opening a browser or inspecting its page.",
+						}));
+						break;
+					}
 					const textAssertion = options.command === "wait" && options.args?.includes("--text") === true;
 					const urlAssertion = options.command === "wait" && options.args?.includes("--url") === true;
 					actions.push(buildNextToolAction({

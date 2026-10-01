@@ -1,0 +1,296 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { InMemoryCredentialStore, normalizeContext, validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
+import { stream as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
+import {
+	createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
+	type AgentSession, type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { JsonSchema } from "../extensions/agent-browser/lib/json-schema.js";
+import { AGENT_BROWSER_ACTION_PARAMS, AGENT_BROWSER_QA_PARAMS } from "../extensions/agent-browser/lib/input-modes/params.js";
+import { resolveAgentBrowserInput, type AgentBrowserExecuteParams } from "../extensions/agent-browser/lib/orchestration/input-plan.js";
+import { ADVANCED_TOOL_PROMPT_GUIDELINES, QUICK_START_GUIDELINES, RUNTIME_PROMPT_GUIDELINES, SHARED_BROWSER_PLAYBOOK_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
+import { registerAgentBrowserToolSurface } from "../extensions/agent-browser/lib/tool-surface.js";
+
+async function withSurface(
+	run: (fixture: {
+		session: AgentSession;
+		call: (name: string, input: JsonObject) => Promise<{ content: unknown; details?: unknown }>;
+		active: () => string[];
+		all: () => string[];
+		calls: AgentBrowserExecuteParams[];
+		codeCalls: unknown[];
+		reload: () => Promise<void>;
+	}) => Promise<void>,
+	options: { tools?: string[]; sessionManager?: SessionManager } = {},
+) {
+	const directory = await mkdtemp(join(tmpdir(), "piab-tool-surface-"));
+	const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false, credentials: new InMemoryCredentialStore(), modelsPath: null });
+	const calls: AgentBrowserExecuteParams[] = [];
+	const codeCalls: unknown[] = [];
+	let context: ExtensionContext;
+	const resourceLoader = new DefaultResourceLoader({
+		agentDir: directory, cwd: directory,
+		noContextFiles: true, noExtensions: true, noPromptTemplates: true, noSkills: true, noThemes: true,
+		extensionFactories: [(pi) => {
+			pi.registerTool({ name: "unrelated", label: "Unrelated", description: "Another extension", parameters: JsonSchema.Object({}), async execute() { return { content: [], details: {} }; } });
+			registerAgentBrowserToolSurface(pi, {
+				async execute(_id, params, _signal, _onUpdate, ctx) {
+					assert.equal(ctx, context);
+					calls.push(params);
+					const resolved = resolveAgentBrowserInput({ params, getBatchPreflightValidationError: () => undefined });
+					return { content: [{ type: "text", text: resolved.status }], details: { resolved } };
+				},
+				async executeCode(_id, params) { codeCalls.push(params); return { content: [], details: {} }; },
+			});
+			pi.on("session_start", (_event, ctx) => { context = ctx; });
+		}],
+	});
+	try {
+		await resourceLoader.reload();
+		assert.deepEqual(resourceLoader.getExtensions().errors, []);
+		const { session } = await createAgentSession({
+			cwd: directory, modelRuntime, resourceLoader, noTools: "builtin", tools: options.tools,
+			settingsManager: SettingsManager.inMemory(), sessionManager: options.sessionManager ?? SessionManager.inMemory(directory),
+		});
+		try {
+			await session.bindExtensions({ onError: (error) => { throw new Error(error.error); } });
+			await run({
+				session,
+				async call(name, input) {
+					const tool = session.getToolDefinition(name);
+					assert.ok(tool, `registered ${name}`);
+					const params = validateToolArguments(tool, { type: "toolCall", name, id: "surface", arguments: input });
+					return tool.execute("surface", params, undefined, undefined, context as Parameters<typeof tool.execute>[4]);
+				},
+				active: () => session.getActiveToolNames(),
+				all: () => session.getAllTools().map(({ name }) => name),
+				calls, codeCalls,
+				reload: () => session.reload(),
+			});
+		} finally {
+			session.dispose();
+		}
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+const baseTools = ["agent_browser", "agent_browser_code", "agent_browser_tools", "unrelated"];
+
+test("registered browser code serializes for Anthropic while Pi still rejects invalid arguments", async () => {
+	await withSurface(async ({ session, call, codeCalls }) => {
+		const tool = session.getToolDefinition("agent_browser_code");
+		assert.ok(tool);
+		let payload: { tools: { name: string; strict?: boolean; input_schema: { properties: Record<string, unknown>; required: string[] } }[] } | undefined;
+		const result = await streamAnthropic({
+			id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic", api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com", reasoning: false, input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1024,
+			compat: { supportsStrictTools: true },
+		}, normalizeContext({ messages: [
+			{ role: "system", content: "", toolsAdded: [tool], timestamp: 1 },
+			{ role: "user", content: "Use browser code.", timestamp: 2 },
+		] }), {
+			apiKey: "test-key", maxRetries: 0,
+			async fetch(_url, init) {
+				payload = JSON.parse(String(init?.body));
+				return new Response('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n', {
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+		}).result();
+		assert.equal(result.stopReason, "stop", result.errorMessage);
+		assert.ok(payload);
+		const [wireTool] = payload.tools;
+		assert.equal(wireTool.name, "agent_browser_code");
+		assert.equal(Object.hasOwn(wireTool, "discovery"), false, "host discovery metadata must not become provider tool fields");
+		// Anthropic rejects integer minimum/maximum in strict tool schemas.
+		assert.equal(wireTool.strict ?? false, false);
+		assert.deepEqual(wireTool.input_schema.properties.timeoutMs, { type: "integer", minimum: 1, maximum: 300000 });
+		assert.deepEqual(wireTool.input_schema.required, ["code"]);
+		assert.deepEqual(Object.keys(wireTool.input_schema.properties).sort(), ["code", "namespace", "outputPath", "session", "timeoutMs"]);
+		assert.ok(Buffer.byteLength(JSON.stringify(tool.parameters)) < 1400);
+		const invalidInputs: JsonObject[] = [{ code: "" }, { code: "emit(1)", session: "" }, { code: "emit(1)", timeoutMs: 0 }, { code: "emit(1)", timeoutMs: 300001 }, { code: "emit(1)", timeoutMs: 1.5 }, { code: "emit(1)", args: [] }, { script: "emit(1)" }];
+		for (const input of invalidInputs) {
+			await assert.rejects(call(tool.name, input), /Validation failed/, JSON.stringify(input));
+		}
+		assert.deepEqual(codeCalls, []);
+		await call(tool.name, { code: "emit(1)", session: null, namespace: "", timeoutMs: null, outputPath: null });
+		assert.deepEqual(codeCalls, [{ code: "emit(1)", namespace: "" }]);
+	});
+});
+
+test("native Pi registration keeps advanced tools discoverable and activation additive", async () => {
+	await withSurface(async ({ call, active, all }) => {
+		assert.deepEqual(all().filter((name) => name.startsWith("agent_browser")).sort(), ["agent_browser", "agent_browser_action", "agent_browser_code", "agent_browser_electron", "agent_browser_network_source", "agent_browser_qa", "agent_browser_source", "agent_browser_tools"]);
+		assert.deepEqual(active().sort(), [...baseTools].sort());
+		const inventory = await call("agent_browser_tools", {});
+		assert.match(JSON.stringify(inventory.content), /agent_browser_network_source.*inactive/);
+		assert.deepEqual(active().sort(), [...baseTools].sort());
+		const loaded = await call("agent_browser_tools", { enable: ["qa", "action", "qa"] });
+		assert.deepEqual((loaded.details as { added: string[] }).added, ["agent_browser_qa", "agent_browser_action"]);
+		assert.deepEqual(active().sort(), [...baseTools, "agent_browser_action", "agent_browser_qa"].sort());
+		await call("agent_browser_tools", { enable: ["electron"] });
+		assert.ok(active().includes("agent_browser_qa"));
+		assert.ok(active().includes("unrelated"));
+	});
+});
+
+test("advanced wrappers normalize into one executor while code keeps explicit identity", async () => {
+	await withSurface(async ({ call, calls, codeCalls }) => {
+		await call("agent_browser", { args: ["get", "url"], timeoutMs: 500 });
+		await call("agent_browser_action", { action: "fill", locator: "label", value: "Email", text: "user@example.com", session: "chosen", outputPath: "action.json", timeoutMs: 1000 });
+		await call("agent_browser_qa", { attached: true, expectedText: "Ready", checkNetwork: true, outputPath: "qa.json", timeoutMs: 2000 });
+		await call("agent_browser_electron", { action: "launch", appName: "Editor", timeoutMs: 3000, outputPath: "electron.json" });
+		await call("agent_browser_source", { componentName: "Editor", maxWorkspaceFiles: 42, outputPath: "source.json", timeoutMs: 4000 });
+		await call("agent_browser_network_source", { requestId: "req1", session: "chosen", namespace: "", outputPath: "network.json", timeoutMs: 5000 });
+		const normalized = calls.map((params) => resolveAgentBrowserInput({ params, getBatchPreflightValidationError: () => undefined }));
+		assert.deepEqual(normalized.map(({ status }) => status), Array(6).fill("valid"));
+		assert.deepEqual(normalized.map(({ kind }) => kind), ["args", "semanticAction", "qa", "electron", "sourceLookup", "networkSourceLookup"]);
+		assert.deepEqual(calls[1].semanticAction, { action: "fill", locator: "label", value: "Email", text: "user@example.com", session: "chosen" });
+		assert.equal(calls[2].timeoutMs, 2000);
+		assert.deepEqual(calls[3], { electron: { action: "launch", appName: "Editor", timeoutMs: 3000 }, outputPath: "electron.json" });
+		assert.equal(calls[4].timeoutMs, 4000);
+		assert.deepEqual(calls[5].networkSourceLookup, { requestId: "req1", session: "chosen", namespace: "" });
+		await call("agent_browser_code", { code: "emit(1)", session: "chosen", namespace: "", timeoutMs: 300000 });
+		assert.deepEqual(codeCalls, [{ code: "emit(1)", session: "chosen", namespace: "", timeoutMs: 300000 }]);
+		assert.equal(calls.length, 6);
+	});
+});
+
+test("startup preserves native transcript activation and honors native removals", async () => {
+	const manager = SessionManager.inMemory();
+	manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [
+		{ name: "agent_browser_qa", description: "QA", parameters: AGENT_BROWSER_QA_PARAMS },
+		{ name: "agent_browser_action", description: "Action", parameters: AGENT_BROWSER_ACTION_PARAMS },
+	] });
+	manager.appendMessage({ role: "system", content: "", timestamp: 2, toolsRemoved: [{ name: "agent_browser_action" }] });
+	await withSurface(async ({ active }) => {
+		assert.deepEqual(active().sort(), [...baseTools, "agent_browser_qa"].sort());
+	}, { sessionManager: manager });
+});
+
+for (const restoredQa of [false, true]) {
+	test(`native reload preserves compact activation (restored QA: ${restoredQa})`, async () => {
+		const manager = SessionManager.inMemory();
+		if (restoredQa) manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [{ name: "agent_browser_qa", description: "QA", parameters: AGENT_BROWSER_QA_PARAMS }] });
+		await withSurface(async ({ active, reload }) => {
+			const expected = [...baseTools, ...(restoredQa ? ["agent_browser_qa"] : [])].sort();
+			assert.deepEqual(active().sort(), expected);
+			await reload();
+			assert.deepEqual(active().sort(), expected);
+		}, { sessionManager: manager });
+	});
+}
+
+test("explicit native CLI tool selection stays active and the loader cannot override unavailable tools", async () => {
+	const original = process.argv;
+	try {
+		process.argv = [original[0], "pi", "--tools", "agent_browser_action,agent_browser_tools,unrelated"];
+		await withSurface(async ({ call, active }) => {
+			assert.deepEqual(active().sort(), ["agent_browser_action", "agent_browser_tools", "unrelated"]);
+			const result = await call("agent_browser_tools", { enable: ["qa"] });
+			assert.match(JSON.stringify(result.content), /agent_browser_qa.*unavailable/);
+			assert.equal(active().includes("agent_browser_qa"), false);
+			assert.equal(active().includes("agent_browser_action"), true);
+		}, { tools: ["agent_browser_action", "agent_browser_tools", "unrelated"] });
+	} finally { process.argv = original; }
+});
+
+for (const tools of [["agent_browser_qa"], ["agent_browser_qa", "agent_browser_tools"]]) {
+	test(`SDK-selected advanced tools stay active with selection ${tools.join(",")}`, async () => {
+		await withSurface(async ({ active }) => { assert.deepEqual(active().sort(), [...tools].sort()); }, { tools });
+	});
+}
+
+test("internal input normalization preserves QA semantics without public job/script routes", () => {
+	for (const params of [{ script: "emit(1)" }, { job: { steps: [{ action: "snapshot" }] } }]) {
+		const resolved = resolveAgentBrowserInput({ params: params as AgentBrowserExecuteParams, getBatchPreflightValidationError: () => undefined });
+		assert.equal(resolved.status, "invalid");
+	}
+	const resolve = (params: AgentBrowserExecuteParams) => resolveAgentBrowserInput({ params, getBatchPreflightValidationError: () => undefined });
+	assert.match(resolve({ qa: { attached: true }, sessionMode: "fresh" }).validationError ?? "", /cannot be used/);
+	assert.match(resolve({ qa: { url: "https://example.com" }, stdin: "[]" }).validationError ?? "", /generate their own batch stdin/);
+	const qa = resolve({ qa: { url: "https://example.com", expectedText: "Ready" } });
+	assert.equal(qa.kind, "qa");
+	if (qa.kind !== "qa") assert.fail("QA should compile");
+	assert.equal(qa.compiledQaPreset.checks.checkNetwork, true);
+	assert.equal(qa.compiledQaPreset.checks.diagnosticsResetAtStart, true);
+	assert.equal(qa.compiledGeneratedBatch.failFast, true);
+	assert.deepEqual(qa.compiledGeneratedBatch.args, ["batch", "--bail"]);
+	assert.ok(qa.compiledGeneratedBatch.steps.some(({ args }) => args[0] === "wait" && args[1] === "--fn"));
+});
+
+test("prompt routing is compact and preserves browser authority, recovery, and image geometry", () => {
+	const runtime = RUNTIME_PROMPT_GUIDELINES.join("\n");
+	assert.ok(Buffer.byteLength(runtime) < 3500);
+	for (const required of ["batch --bail", "result.success", "emitImage(result.imageObservations[0])", "persistent browser", "globals do not persist", "nextActions", "CSS coordinates", "profiles", "explicit stops"]) assert.ok(runtime.includes(required), required);
+	const playbook = [...QUICK_START_GUIDELINES, ...SHARED_BROWSER_PLAYBOOK_GUIDELINES, ...Object.values(ADVANCED_TOOL_PROMPT_GUIDELINES).flat()].join("\n");
+	assert.doesNotMatch(playbook, /top-level script|\{\s*(?:script|job):|semanticAction\/job|result\.ok/);
+	for (const [key, guidelines] of Object.entries(ADVANCED_TOOL_PROMPT_GUIDELINES)) {
+		const toolName = key === "network" ? "agent_browser_network_source" : `agent_browser_${key}`;
+		assert.ok(guidelines.every((line) => line.includes(toolName)), `${key} guidelines must name their tool`);
+	}
+});
+
+test("Electron action schemas preserve field boundaries through native Pi validation", async () => {
+	await withSurface(async ({ call, calls }) => {
+		await call("agent_browser_electron", { action: "list", appPath: null, maxResults: null });
+		assert.deepEqual(calls.at(-1)?.electron, { action: "list" });
+		const fields: JsonObject = {
+			query: "Editor", maxResults: 3, appPath: "/Applications/Editor.app", appName: "Editor",
+			bundleId: "com.example.editor", executablePath: "/usr/bin/editor", appArgs: ["--test"],
+			handoff: "connect", targetType: "page", timeoutMs: 3000, allow: ["example.com"],
+			deny: ["blocked.example"], launchId: "launch-1", all: true, outputPath: "result.json",
+		};
+		const allowed: Record<string, string[]> = {
+			list: ["query", "maxResults", "outputPath"],
+			launch: ["appPath", "appName", "bundleId", "executablePath", "appArgs", "handoff", "targetType", "timeoutMs", "allow", "deny", "outputPath"],
+			status: ["launchId", "all", "timeoutMs", "outputPath"],
+			cleanup: ["launchId", "all", "timeoutMs", "outputPath"],
+			probe: ["launchId", "timeoutMs", "outputPath"],
+		};
+		for (const [action, names] of Object.entries(allowed)) {
+			await call("agent_browser_electron", { action });
+			for (const [field, value] of Object.entries(fields)) {
+				const input = { action, [field]: value };
+				if (names.includes(field)) {
+					await call("agent_browser_electron", input);
+				} else {
+					const before = calls.length;
+					await assert.rejects(call("agent_browser_electron", input), /Validation failed/);
+					assert.equal(calls.length, before, `${action}.${field} must not dispatch`);
+				}
+			}
+		}
+		const invalid: JsonObject[] = [
+			{ action: "status", launchId: "launch-1", all: true },
+			{ action: "cleanup", launchId: "launch-1", all: true },
+			{ action: "launch", timeoutMs: 0 },
+			{ action: "launch", handoff: "invalid" },
+			{ action: "list", maxResults: 0 },
+			{ action: "list", query: "" },
+			{ action: "unknown" },
+			{ action: "list", unknown: true },
+			{},
+		];
+		for (const input of invalid) {
+			await assert.rejects(call("agent_browser_electron", input), /Validation failed/);
+		}
+	});
+});
+
+test("every registered browser tool exposes an object-rooted parameter schema", async () => {
+	await withSurface(async ({ all, session }) => {
+		for (const name of all().filter((name) => name.startsWith("agent_browser"))) {
+			const tool = session.getToolDefinition(name);
+			assert.ok(tool, `registered ${name}`);
+			// Strict providers reject a schema whose root lacks `type: "object"`.
+			assert.equal((tool.parameters as { type?: unknown }).type, "object", `${name} root schema type`);
+		}
+	});
+});

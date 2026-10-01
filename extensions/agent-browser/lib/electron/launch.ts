@@ -69,6 +69,7 @@ export type ElectronLaunchFailureReason =
 	| "timeout";
 
 export interface ElectronLaunchRecord {
+	ownerSessionId?: string;
 	appName: string;
 	appPath?: string;
 	bundleId?: string;

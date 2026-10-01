@@ -11,7 +11,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -26,7 +26,7 @@ const EXTENSION_ENTRYPOINTS = Object.freeze([
 	"dist/extensions/agent-browser/index.js",
 ]);
 const RECOMMENDED_VERSION = TARGET_AGENT_BROWSER_VERSION;
-const MINIMUM_PI_VERSION = "0.84.0";
+export const MINIMUM_PI_VERSION = "0.87.0";
 const DEFAULT_AGENT_DIR = resolve(homedir(), ".pi/agent");
 const THIS_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -155,7 +155,7 @@ function expandUserPath(path) {
 }
 
 function isPathLikeSource(source) {
-	return source.startsWith("/") || source.startsWith("./") || source.startsWith("../") || source.startsWith("~");
+	return isAbsolute(source) || source.startsWith("./") || source.startsWith("../") || source.startsWith("~");
 }
 
 function sourceLooksLikeThisPackage(source, cwd, sourceBaseDir = cwd) {
@@ -310,7 +310,7 @@ async function checkPiVersion({ runPi }) {
 				status: "fail",
 				title: `Pi ${MINIMUM_PI_VERSION} or newer is required; found ${version || "<empty>"}.`,
 				lines: [
-					`This release enforces the Pi ${MINIMUM_PI_VERSION} runtime floor through the read-only doctor and release/package validation because it depends on Project Trust, package loading, session lifecycle, TUI rendering, and tool_result patch behavior from that baseline.`,
+					`This release enforces the Pi ${MINIMUM_PI_VERSION} runtime floor through the read-only doctor and release/package validation because it depends on native tool activation/history, prompt sections, and structured tool behavior from that baseline.`,
 					"Update Pi before using this package or running lifecycle/package validation.",
 				],
 			};

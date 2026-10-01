@@ -14,7 +14,7 @@ import test from "node:test";
 
 import { Check } from "typebox/value";
 
-import { analyzeQaPresetResults, analyzeQaPresetTimeout, compileAgentBrowserJob, compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
+import { analyzeQaPresetResults, analyzeQaPresetTimeout, compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
 import { compileAgentBrowserSemanticAction } from "../extensions/agent-browser/lib/input-modes/semantic-action.js";
 import {
 	createExtensionHarness,
@@ -39,19 +39,95 @@ test("analyzeQaPresetTimeout reports unverified expected-text timeouts as QA fai
 	const analysis = analyzeQaPresetTimeout(compiled);
 	assert.equal(analysis?.passed, false);
 	assert.deepEqual(analysis?.failedChecks, ['expected text was not verified before timeout: "Definitely Not On This Page"']);
+	assert.deepEqual(analysis?.notRunChecks, []);
 	assert.match(analysis?.summary ?? "", /QA preset failed/);
 });
 
 test("analyzeQaPresetResults reports missing expected text as QA failure", () => {
-	const compiled = compileAgentBrowserQaPreset({ url: "https://example.test/", expectedText: "Definitely Not On This Page" }).compiled;
+	const compiled = compileAgentBrowserQaPreset({
+		url: "https://example.test/",
+		expectedText: "Definitely Not On This Page",
+		checkConsole: false,
+		checkErrors: false,
+		checkNetwork: false,
+	}).compiled;
 	assert.ok(compiled);
 	const analysis = analyzeQaPresetResults([
 		{ command: ["open", "https://example.test/"], success: true, result: { title: "Example", url: "https://example.test/" } },
 		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
-		{ command: ["get", "text", "body"], success: true, result: { result: "Example Domain" } },
+		{ command: compiled.steps[2]?.args, success: true, result: { result: false } },
 	], compiled);
 	assert.equal(analysis?.passed, false);
 	assert.deepEqual(analysis?.failedChecks, ['expected text not found: "Definitely Not On This Page"']);
+	assert.deepEqual(analysis?.notRunChecks, []);
+});
+
+test("analyzeQaPresetResults reports checks after a fail-fast open failure as not run", () => {
+	const compiled = compileAgentBrowserQaPreset({
+		url: "https://example.test/",
+		expectedText: ["First expected text", "Second expected text", "Third expected text"],
+	}).compiled;
+	assert.ok(compiled);
+	assert.equal(compiled.steps.length, 13);
+	const analysis = analyzeQaPresetResults([
+		{ command: ["network", "requests", "--clear"], success: true, result: { requests: [] } },
+		{ command: ["console", "--clear"], success: true, result: { messages: [] } },
+		{ command: ["errors", "--clear"], success: true, result: { errors: [] } },
+		{ command: ["errors"], success: true, result: { errors: [] } },
+		{ command: ["open", "https://example.test/"], success: false, error: "Navigation failed" },
+	], compiled);
+	assert.deepEqual(analysis?.failedChecks, ["open failed"]);
+	assert.deepEqual(analysis?.notRunChecks, [
+		"load state: domcontentloaded",
+		'expected text: "First expected text"',
+		'expected text: "Second expected text"',
+		'expected text: "Third expected text"',
+		"network diagnostics",
+		"console diagnostics",
+		"page error diagnostics",
+	]);
+	assert.equal(analysis?.summary, "QA preset failed: open failed.");
+});
+
+test("analyzeQaPresetResults distinguishes an executed text assertion from later checks not run", () => {
+	const compiled = compileAgentBrowserQaPreset({
+		url: "https://example.test/",
+		expectedText: "Missing text",
+		expectedSelector: "main",
+		screenshotPath: "qa.png",
+	}).compiled;
+	assert.ok(compiled);
+	const assertionStep = compiled.steps.find((step) => step.action === "assertText");
+	assert.ok(assertionStep);
+	const analysis = analyzeQaPresetResults([
+		{ command: ["network", "requests", "--clear"], success: true, result: { requests: [] } },
+		{ command: ["console", "--clear"], success: true, result: { messages: [] } },
+		{ command: ["errors", "--clear"], success: true, result: { errors: [] } },
+		{ command: ["errors"], success: true, result: { errors: [] } },
+		{ command: ["open", "https://example.test/"], success: true, result: { url: "https://example.test/" } },
+		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
+		{ command: ["wait", "150"], success: true, result: { ok: true } },
+		{ command: assertionStep.args, success: false, error: "Timed out waiting for text" },
+	], compiled);
+	assert.deepEqual(analysis?.failedChecks, ["wait failed", 'expected text not found: "Missing text"']);
+	assert.deepEqual(analysis?.notRunChecks, [
+		'expected selector: "main"',
+		"network diagnostics",
+		"console diagnostics",
+		"page error diagnostics",
+		'screenshot: "qa.png"',
+	]);
+});
+
+test("analyzeQaPresetResults does not infer unreached checks from incomplete successful receipts", () => {
+	const compiled = compileAgentBrowserQaPreset({ url: "https://example.test/", expectedText: "Welcome" }).compiled;
+	assert.ok(compiled);
+	const analysis = analyzeQaPresetResults([
+		{ command: ["network", "requests", "--clear"], success: true, result: { requests: [] } },
+	], compiled);
+	assert.equal(analysis?.passed, false);
+	assert.deepEqual(analysis?.notRunChecks, []);
+	assert.deepEqual(analysis?.failedChecks, ["QA execution could not be verified (incomplete batch results)"]);
 });
 
 test("analyzeQaPresetResults ignores reset-phase diagnostic rows for URL QA", () => {
@@ -64,6 +140,7 @@ test("analyzeQaPresetResults ignores reset-phase diagnostic rows for URL QA", ()
 		{ command: ["errors"], success: true, result: { errors: [] } },
 		{ command: ["open", "https://example.test/"], success: true, result: { title: "Example", url: "https://example.test/" } },
 		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
+		{ command: ["wait", "150"], success: true, result: { ok: true } },
 		{ command: ["wait", "--fn", compiled.steps.find((step) => step.action === "assertText")?.args[2] ?? "", "--timeout", "5000"], success: true, result: true },
 		{ command: ["network", "requests"], success: true, result: { requests: [] } },
 		{ command: ["console"], success: true, result: { messages: [] } },
@@ -83,6 +160,7 @@ test("analyzeQaPresetResults treats failed reset-phase diagnostic rows as step f
 		{ command: ["errors"], success: true, result: { errors: [{ text: "old ReferenceError" }] } },
 		{ command: ["open", "https://example.test/"], success: true, result: { title: "Example", url: "https://example.test/" } },
 		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
+		{ command: ["wait", "150"], success: true, result: { ok: true } },
 		{ command: ["network", "requests"], success: true, result: { requests: [] } },
 		{ command: ["console"], success: true, result: { messages: [] } },
 		{ command: ["errors"], success: true, result: { errors: [] } },
@@ -101,6 +179,7 @@ test("analyzeQaPresetResults still reports post-open page errors", () => {
 		{ command: ["errors"], success: true, result: { errors: [] } },
 		{ command: ["open", "https://example.test/"], success: true, result: { title: "Example", url: "https://example.test/" } },
 		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
+		{ command: ["wait", "150"], success: true, result: { ok: true } },
 		{ command: ["network", "requests"], success: true, result: { requests: [] } },
 		{ command: ["console"], success: true, result: { messages: [] } },
 		{ command: ["errors"], success: true, result: { errors: [{ text: "current page boom" }] } },
@@ -109,7 +188,7 @@ test("analyzeQaPresetResults still reports post-open page errors", () => {
 	assert.deepEqual(analysis?.failedChecks, ["1 page error(s)"]);
 });
 
-test("analyzeQaPresetResults subtracts unchanged post-clear page-error residue when upstream clear is a no-op", () => {
+test("analyzeQaPresetResults fails unverified matched page-error evidence when clear is a no-op", () => {
 	const compiled = compileAgentBrowserQaPreset({ url: "https://clean.example.test/", checkConsole: false, checkNetwork: false }).compiled;
 	assert.ok(compiled);
 	const staleError = { message: "old ReferenceError", stack: "at https://old.example.test/app.js:1:1" };
@@ -118,11 +197,32 @@ test("analyzeQaPresetResults subtracts unchanged post-clear page-error residue w
 		{ command: ["errors"], success: true, result: { errors: [staleError] } },
 		{ command: ["open", "https://clean.example.test/"], success: true, result: { url: "https://clean.example.test/" } },
 		{ command: ["wait", "--load", "domcontentloaded"], success: true, result: { ok: true } },
+		{ command: ["wait", "150"], success: true, result: { ok: true } },
 		{ command: ["errors"], success: true, result: { errors: [staleError] } },
 	], compiled);
-	assert.equal(analysis?.passed, true);
-	assert.deepEqual(analysis?.failedChecks, []);
-	assert.deepEqual(analysis?.warnings, ["1 post-clear page error residue row(s) ignored as unchanged"]);
+	assert.equal(analysis?.passed, false);
+	assert.deepEqual(analysis?.failedChecks, ["page-error check could not be verified (1 row(s) matched the post-clear baseline; old residue and identical new errors are indistinguishable)"]);
+	assert.deepEqual(analysis?.warnings, []);
+	assert.doesNotMatch(analysis?.summary ?? "", /passed|unchanged|1 page error\(s\)/);
+});
+
+test("analyzeQaPresetResults separates novel page errors from ambiguous matching rows", () => {
+	const compiled = compileAgentBrowserQaPreset({ url: "https://target.example.test/", checkConsole: false, checkNetwork: false }).compiled;
+	assert.ok(compiled);
+	const error = { text: "repeated error" };
+	const analysis = analyzeQaPresetResults(compiled.steps.map((step) => ({
+		command: step.args,
+		success: true,
+		result: step.args[0] === "errors"
+			? { errors: step.args.includes("--clear") || step.generatedFrom === "qa.errorBaselineAfterClear" ? [error] : [error, error] }
+			: { ok: true },
+	})), compiled);
+	assert.equal(analysis?.passed, false);
+	assert.deepEqual(analysis?.failedChecks, [
+		"1 page error(s)",
+		"page-error check could not be verified (1 row(s) matched the post-clear baseline; old residue and identical new errors are indistinguishable)",
+	]);
+	assert.deepEqual(analysis?.warnings, []);
 });
 
 test("analyzeQaPresetResults reports a new matching error after a successful clear", () => {
@@ -139,111 +239,6 @@ test("analyzeQaPresetResults reports a new matching error after a successful cle
 	], compiled);
 	assert.equal(analysis?.passed, false);
 	assert.deepEqual(analysis?.failedChecks, ["1 page error(s)"]);
-});
-
-test("compileAgentBrowserJob preserves explicit assertUrl and assertText immediately after click", () => {
-	const semanticJob = compileAgentBrowserJob({
-		steps: [
-			{ action: "open", url: "https://www.wikipedia.org/" },
-			{ action: "fill", locator: "role", role: "searchbox", name: "Search", text: "agent browser" },
-			{ action: "click", locator: "role", role: "button", name: "Search" },
-		],
-	});
-	assert.equal(semanticJob.error, undefined);
-	assert.deepEqual(semanticJob.compiled?.steps.map((step) => step.args), [
-		["open", "https://www.wikipedia.org/"],
-		["find", "role", "searchbox", "fill", "agent browser", "--name", "Search"],
-		["find", "role", "button", "click", "--name", "Search"],
-	]);
-	assert.match(compileAgentBrowserJob({ steps: [{ action: "click", selector: "button", locator: "text", value: "Search" }] }).error ?? "", /either selector or semantic locator fields/);
-
-	const { compiled, error } = compileAgentBrowserJob({
-		steps: [
-			{ action: "open", url: "https://shop.example/checkout" },
-			{ action: "fill", selector: "#email", text: "user@example.com" },
-			{ action: "click", selector: "#continue" },
-			{ action: "assertUrl", url: "**/shipping" },
-			{ action: "assertText", text: "Shipping address" },
-			{ action: "screenshot", path: ".dogfood/shipping.png" },
-		],
-	});
-	assert.equal(error, undefined);
-	assert.deepEqual(
-		compiled?.steps?.map((step) => step.action),
-		["open", "fill", "click", "assertUrl", "assertText", "screenshot"],
-	);
-	assert.deepEqual(compiled?.steps?.map((step) => step.args), [
-		["open", "https://shop.example/checkout"],
-		["fill", "#email", "user@example.com"],
-		["click", "#continue"],
-		["wait", "--url", "**/shipping"],
-		["wait", "--text", "Shipping address"],
-		["screenshot", ".dogfood/shipping.png"],
-	]);
-
-	const exactUrlJob = compileAgentBrowserJob({ steps: [{ action: "assertUrl", url: "https://shop.example/shipping" }] });
-	assert.deepEqual(exactUrlJob.compiled?.steps?.[0]?.args, ["wait", "--url", "https://shop.example/shipping"]);
-	const exactQueryUrlJob = compileAgentBrowserJob({ steps: [{ action: "assertUrl", url: "https://shop.example/shipping?step=1&ref=a?b" }] });
-	assert.deepEqual(exactQueryUrlJob.compiled?.steps?.[0]?.args, ["wait", "--url", "https://shop.example/shipping?step=1&ref=a?b"]);
-	assert.deepEqual(JSON.parse(compiled?.stdin ?? "[]"), compiled?.steps?.map((step) => step.args));
-});
-
-test("compileAgentBrowserJob rejects unsupported fields for every constrained job action", () => {
-	const invalidSteps = [
-		[{ action: "open", url: "https://example.test/", path: "ignored.png" }, /job step open does not support path/],
-		[{ action: "click", selector: "#submit", text: "ignored" }, /job step click does not support text/],
-		[{ action: "fill", selector: "#email", text: "user@example.test", values: ["ignored"] }, /job step fill does not support values/],
-		[{ action: "type", selector: "#prompt", text: "go", url: "https://example.test/" }, /job step type does not support url/],
-		[{ action: "select", selector: "#theme", values: ["dark"], text: "ignored" }, /job step select does not support text/],
-		[{ action: "wait", milliseconds: 250, selector: "#spinner" }, /job step wait does not support selector/],
-		[{ action: "assertText", text: "Welcome", url: "https://example.test/" }, /job step assertText does not support url/],
-		[{ action: "assertUrl", url: "**/dashboard", text: "Welcome" }, /job step assertUrl does not support text/],
-		[{ action: "waitForDownload", path: "report.csv", url: "https://example.test/report.csv" }, /job step waitForDownload does not support url/],
-		[{ action: "snapshot", selector: "body" }, /job step snapshot does not support selector/],
-		[{ action: "screenshot", path: "job.png", url: "https://example.test/" }, /job step screenshot does not support url/],
-	] as const;
-
-	for (const [step, expectedError] of invalidSteps) {
-		const result = compileAgentBrowserJob({ steps: [step] });
-		assert.equal(result.compiled, undefined, `unexpected compile success for ${JSON.stringify(step)}`);
-		assert.match(result.error ?? "", expectedError);
-	}
-
-	const validJob = compileAgentBrowserJob({
-		steps: [
-			{ action: "open", url: "https://example.test/", loadState: "domcontentloaded" },
-			{ action: "click", locator: "role", role: "button", name: "Search" },
-			{ action: "fill", selector: "#email", text: "user@example.test" },
-			{ action: "select", selector: "#theme", values: ["dark"] },
-			{ action: "wait", milliseconds: 250 },
-			{ action: "assertText", text: "Welcome" },
-			{ action: "assertUrl", url: "**/dashboard" },
-			{ action: "waitForDownload", path: "report.csv" },
-			{ action: "snapshot" },
-			{ action: "screenshot", path: "job.png" },
-		],
-	});
-	assert.equal(validJob.error, undefined);
-	assert.deepEqual(validJob.compiled?.steps.map((step) => step.action), [
-		"open",
-		"wait",
-		"click",
-		"fill",
-		"select",
-		"wait",
-		"assertText",
-		"assertUrl",
-		"waitForDownload",
-		"snapshot",
-		"screenshot",
-	]);
-});
-
-test("compileAgentBrowserJob assertUrl delegates patterns to upstream wait --url", () => {
-	for (const url of ["https://shop.example/shipping?step=1&ref=a?b", "**/shipping", "https://shop.example/*/shipping"]) {
-		const result = compileAgentBrowserJob({ steps: [{ action: "assertUrl", url }] });
-		assert.deepEqual(result.compiled?.steps?.[0]?.args, ["wait", "--url", url]);
-	}
 });
 
 test("agentBrowserExtension compiles semantic actions to upstream find commands", { concurrency: false }, async () => {
@@ -665,126 +660,41 @@ if (args.includes("open")) {
 	}
 });
 
-test("agentBrowserExtension compiles constrained jobs to upstream batch commands", { concurrency: false }, async () => {
-	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-job-"));
+test("native batch preserves form fills, delayed keyboard input, condition waits, and artifacts", { concurrency: false }, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-batch-"));
 	const logPath = join(tempDir, "invocations.log");
-	const basePath = process.env.PATH ?? "";
-	await writeFakeAgentBrowserBinary(
-		tempDir,
-		`const fs = require("node:fs");
-const path = require("node:path");
-const args = process.argv.slice(2);
-let stdin = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { stdin += chunk; });
-process.stdin.on("end", () => {
-  fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + "\\n");
-  const steps = JSON.parse(stdin);
-  process.stdout.write(JSON.stringify(steps.map((command) => {
-    const artifactPath = command[0] === "screenshot" ? command[1] : command[0] === "wait" && command[1] === "--download" ? command[2] : undefined;
-    if (artifactPath) {
-      fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
-      fs.writeFileSync(artifactPath, "artifact");
-    }
-    return { command, success: true, result: artifactPath ? { command, path: artifactPath } : { command } };
-  })));
-});`,
-	);
-
+	await writeFakeAgentBrowserBinary(tempDir, `const fs=require('node:fs'); const path=require('node:path'); const args=process.argv.slice(2); let stdin='';
+process.stdin.setEncoding('utf8'); process.stdin.on('data',chunk=>stdin+=chunk); process.stdin.on('end',()=>{
+ fs.appendFileSync(${JSON.stringify(logPath)},JSON.stringify({args,stdin})+'\\n');
+ const rows=JSON.parse(stdin).map(command=>{const file=command[0]==='screenshot'?command[1]:command[0]==='wait'&&command[1]==='--download'?command[2]:undefined;
+ if(file){fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'artifact');}
+ return {command,success:true,result:file?{path:file}:{command}};}); process.stdout.write(JSON.stringify(rows));
+});`);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${process.env.PATH}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-
-			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
-				job: {
-					steps: [
-						{ action: "open", url: "https://example.test/", loadState: "domcontentloaded" },
-						{ action: "fill", selector: "#email", text: "user@example.test" },
-						{ action: "type", selector: "#prompt", text: "go", delayMs: 20, press: "Enter" },
-						{ action: "select", selector: "#theme", values: ["dark", "compact"] },
-						{ action: "click", selector: "#submit" },
-						{ action: "assertText", text: "Welcome" },
-						{ action: "assertUrl", url: "**/dashboard" },
-						{ action: "wait", milliseconds: 250 },
-						{ action: "waitForDownload", path: "report.csv" },
-						{ action: "snapshot" },
-						{ action: "screenshot", path: "job.png" },
-					],
-				},
-			});
-
-			assert.equal(result.isError, false);
-			assert.deepEqual(result.details?.args, ["batch", "--bail"]);
-			const effectiveArgs = result.details?.effectiveArgs as string[] | undefined;
-			assert.deepEqual(effectiveArgs?.slice(0, 2), ["--json", "--session"]);
-			assert.match(effectiveArgs?.[2] ?? "", process.platform === "android" ? /^piab-[a-f0-9]{20}$/ : /^piab-pi-agent-browser-job-/);
-			assert.equal(effectiveArgs?.[3], "batch");
-			assert.equal(effectiveArgs?.[4], "--bail");
-			const compiledJob = result.details?.compiledJob as { args?: string[]; failFast?: boolean; stdin?: string; steps?: Array<{ action: string; args: string[]; generatedFrom?: string }> } | undefined;
-			assert.deepEqual(compiledJob?.args, ["batch", "--bail"]);
-			assert.equal(compiledJob?.failFast, true);
-			const compiledStepArgs = compiledJob?.steps?.map((step) => step.args);
-			assert.deepEqual(compiledStepArgs?.slice(0, 11), [
-				["open", "https://example.test/"],
-				["wait", "--load", "domcontentloaded"],
-				["fill", "#email", "user@example.test"],
-				["focus", "#prompt"],
-				["keyboard", "type", "g"],
-				["wait", "20"],
-				["keyboard", "type", "o"],
-				["press", "Enter"],
-				["select", "#theme", "dark", "compact"],
-				["click", "#submit"],
-				["wait", "--text", "Welcome"],
-			]);
-			assert.deepEqual(compiledStepArgs?.[11], ["wait", "--url", "**/dashboard"]);
-			assert.deepEqual(compiledStepArgs?.slice(12), [
-				["wait", "250"],
-				["wait", "--download", "report.csv"],
-				["snapshot", "-i"],
-				["screenshot", "job.png"],
-			]);
-			assert.equal(compiledJob?.steps?.[1]?.generatedFrom, "open.loadState");
-			assert.equal(compiledJob?.steps?.[3]?.generatedFrom, "type.selector");
-			assert.equal(compiledJob?.steps?.[4]?.generatedFrom, "type.delayMs");
-			assert.equal(compiledJob?.steps?.[7]?.generatedFrom, "type.press");
-			assert.deepEqual(JSON.parse(compiledJob?.stdin ?? "[]"), compiledStepArgs);
-			assert.match(result.content[0]?.text ?? "", /Step 4-8 — type #prompt \(succeeded\)\nTyped 2 chars with delayMs=20\.\nPressed Enter\./);
-			assert.doesNotMatch(result.content[0]?.text ?? "", /Step 5 — keyboard type g/);
-			const redactedResult = await executeRegisteredTool(harness.tool, harness.ctx, {
-				job: { steps: [{ action: "open", url: "https://user:secret@example.test/path?token=abc&ok=1#access_token=xyz" }] },
-			});
-			const redactedCompiledJob = redactedResult.details?.compiledJob as { stdin?: string; steps?: Array<{ args: string[] }> } | undefined;
-			assert.match(redactedCompiledJob?.stdin ?? "", /%5BREDACTED%5D/);
-			assert.doesNotMatch(redactedCompiledJob?.stdin ?? "", /secret|token=abc|access_token=xyz/);
-			assert.deepEqual(JSON.parse(redactedCompiledJob?.stdin ?? "[]"), redactedCompiledJob?.steps?.map((step) => step.args));
-
-			const invocations = await readInvocationLog(logPath);
-			assert.deepEqual(invocations[0]?.args.slice(-2), ["batch", "--bail"]);
-			const upstreamSteps = JSON.parse(invocations[0]?.stdin ?? "[]") as string[][];
-			assert.deepEqual(upstreamSteps.slice(0, 15), compiledJob?.steps?.slice(0, 15).map((step) => step.args));
-			assert.equal(upstreamSteps[15]?.[0], "screenshot");
-			assert.match(upstreamSteps[15]?.[1] ?? "", /job\.png$/);
-
-			const invalidTypeResult = await executeRegisteredTool(harness.tool, harness.ctx, {
-				job: { steps: [{ action: "type", selector: "#prompt", text: "go", url: "https://example.test" }] },
-			});
-			assert.equal(invalidTypeResult.isError, true);
-			assert.match(invalidTypeResult.content[0]?.text ?? "", /job step type does not support url/);
-
-			const longDelayedTypeResult = await executeRegisteredTool(harness.tool, harness.ctx, {
-				job: { steps: [{ action: "type", text: "x".repeat(201), delayMs: 1 }] },
-			});
-			assert.equal(longDelayedTypeResult.isError, true);
-			assert.match(longDelayedTypeResult.content[0]?.text ?? "", /delayMs supports at most 200 characters/);
+			const steps = [
+				["open", "https://example.test/"], ["wait", "--load", "domcontentloaded"], ["fill", "#email", "user@example.test"],
+				["focus", "#prompt"], ["keyboard", "type", "g"], ["wait", "20"], ["keyboard", "type", "o"], ["press", "Enter"],
+				["select", "#theme", "dark", "compact"], ["click", "#submit"], ["wait", "--text", "Welcome"], ["wait", "--url", "**/dashboard"],
+				["wait", "250"], ["wait", "--download", "report.csv"], ["snapshot", "-i"], ["screenshot", "batch.png"],
+			];
+			const result = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["batch", "--bail"], stdin: JSON.stringify(steps) });
+			assert.equal(result.isError, false, JSON.stringify(result));
+			assert.equal(result.details?.compiledJob, undefined);
+			const invocation = (await readInvocationLog(logPath)).find(call => call.args.includes("batch"));
+			assert.ok(invocation); assert.deepEqual(invocation.args.slice(-2), ["batch", "--bail"]);
+			const dispatched = JSON.parse(invocation.stdin ?? "[]");
+			assert.deepEqual(dispatched.slice(0, 15), steps.slice(0, 15));
+			assert.equal(dispatched[15][1], join(tempDir, "batch.png"));
+			const redacted = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["batch", "--bail"], stdin: JSON.stringify([["open", "https://user:secret@example.test/path?token=abc&ok=1#access_token=xyz"]]) });
+			assert.doesNotMatch(JSON.stringify(redacted), /user:secret|token=abc|access_token=xyz/);
 		});
-	} finally {
-		await rm(tempDir, { force: true, recursive: true });
-	}
+	} finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
-test("agentBrowserExtension reports failed fresh jobs as post-launch failures", { concurrency: false }, async () => {
+test("agentBrowserExtension reports failed fresh batches as post-launch failures", { concurrency: false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-fresh-job-failure-"));
 	const logPath = join(tempDir, "invocations.log");
 	const basePath = process.env.PATH ?? "";
@@ -820,20 +730,13 @@ process.stdin.on("end", () => {
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-			const prior = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://github.com/vercel-labs/agent-browser"] });
+			const prior = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["open", "https://github.com/vercel-labs/agent-browser"], sessionMode: "fresh" });
 			assert.equal(prior.isError, false);
 
 			const screenshotPath = join(tempDir, "wiki.png");
 			const result = await executeRegisteredTool(harness.tool, harness.ctx, {
-				job: {
-					failFast: false,
-					steps: [
-						{ action: "open", url: "https://www.wikipedia.org/" },
-						{ action: "fill", selector: "input[name='search']", text: "agent-browser" },
-						{ action: "click", selector: "button[type='submit']" },
-						{ action: "screenshot", path: screenshotPath },
-					],
-				},
+				args: ["batch"],
+				stdin: JSON.stringify([["open", "https://www.wikipedia.org/"], ["fill", "input[name='search']", "agent-browser"], ["click", "button[type='submit']"], ["screenshot", screenshotPath]]),
 				sessionMode: "fresh",
 			});
 
@@ -883,7 +786,7 @@ function readSessionState() {
 function writeSessionState(nextState) {
   let parsed = {};
   try { parsed = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch {}
-  parsed[getSessionKey()] = nextState;
+  parsed[getSessionKey()] = { ...nextState, restoreKey: process.env.AGENT_BROWSER_RESTORE ?? parsed[getSessionKey()]?.restoreKey ?? null };
   fs.writeFileSync(statePath, JSON.stringify(parsed));
 }
 function findCommandStartIndex(argv) {
@@ -900,11 +803,16 @@ function writeStandaloneResult(data) {
   process.stdout.write(JSON.stringify({ success: true, data }));
 }
 function handleStandaloneCommand() {
-  fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + "\\n");
   const commandIndex = findCommandStartIndex(args);
   const command = args[commandIndex];
   const subcommand = args[commandIndex + 1];
   const sessionState = readSessionState();
+  if (command === "session" && subcommand === "info") {
+    const active = sessionState.restoreKey !== undefined;
+    writeStandaloneResult({ active, runtime: active ? { restoreKey: sessionState.restoreKey } : null });
+    return true;
+  }
+  fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args, stdin }) + "\\n");
   if (command === "get" && subcommand === "url") {
     if (process.env.QA_ATTACHED_GET_URL_FAIL === "1") {
       process.stderr.write("get url failed");
@@ -937,6 +845,9 @@ process.stdin.on("end", () => {
     if (name === "open") {
       const url = String(command[1] || "");
       const title = url.includes("blank") ? "Blank Page" : "QA Page";
+      if (process.env.AGENT_BROWSER_FAKE_QA_MODE === "open-bail") {
+        return { command, success: false, error: "Navigation failed: net::ERR_CERT_AUTHORITY_INVALID at https://qa.example.test/?token=secret" };
+      }
       writeSessionState({ title, url });
       mode = url.includes("fail") ? "fail" : url.includes("favicon") ? "favicon" : "clean";
       return { command, success: true, result: { title, url } };
@@ -952,6 +863,7 @@ process.stdin.on("end", () => {
       return { command, success: true, result: staleConsole || mode === "fail" ? { messages: [{ type: "error", text: "boom" }] } : { messages: [] } };
     }
     if (name === "errors") {
+      if (command.includes("--clear") && process.env.AGENT_BROWSER_FAKE_QA_MODE !== "residue") staleErrors = false;
       const errors = [];
       if (staleErrors) errors.push({ text: "stale page boom" });
       if (mode === "fail") errors.push({ text: "current page boom" });
@@ -960,7 +872,7 @@ process.stdin.on("end", () => {
     if (name === "get" && command[1] === "text") {
       return { command, success: true, result: { result: mode === "blank" ? "" : "Welcome to the QA Page" } };
     }
-    if (name === "wait" && process.env.AGENT_BROWSER_FAKE_QA_MODE === "wait-fail") {
+    if (name === "wait" && (process.env.AGENT_BROWSER_FAKE_QA_MODE === "wait-fail" || (process.env.AGENT_BROWSER_FAKE_QA_MODE === "assertion-fail" && command[1] === "--fn"))) {
       return { command, success: false, error: "Timed out waiting for QA assertion" };
     }
     if (name === "screenshot" && typeof command[1] === "string" && !command[1].includes("missing-qa-screenshot")) {
@@ -969,17 +881,18 @@ process.stdin.on("end", () => {
     }
     return { command, success: true, result: { ok: true } };
   });
-  process.stdout.write(JSON.stringify(results));
+  const failureIndex = results.findIndex((row) => row.success === false);
+  process.stdout.write(JSON.stringify(args.includes("--bail") && failureIndex >= 0 ? results.slice(0, failureIndex + 1) : results));
 });`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-			assert.equal(Check(harness.tool.parameters, { qa: { attached: true, expectedText: "Welcome" } }), true);
-			assert.equal(Check(harness.tool.parameters, { qa: { attached: true, url: "https://example.test/" } }), false);
-			assert.equal(Check(harness.tool.parameters, { qa: { expectedText: "Welcome" } }), false);
+			assert.equal(Check(harness.getTool("agent_browser_qa")!.parameters, { attached: true, expectedText: "Welcome" }), true);
+			assert.equal(Check(harness.getTool("agent_browser_qa")!.parameters, { attached: true, url: "https://example.test/" }), false);
+			assert.equal(Check(harness.getTool("agent_browser_qa")!.parameters, { expectedText: "Welcome" }), false);
 			const attachedWithoutSession = await executeRegisteredTool(harness.tool, harness.ctx, { qa: { attached: true, expectedText: "Welcome" } });
 			assert.equal(attachedWithoutSession.isError, true);
 			assert.match(attachedWithoutSession.content[0]?.text ?? "", /qa\.attached requires an active attached session/);
@@ -992,14 +905,44 @@ process.stdin.on("end", () => {
 				},
 			});
 			assert.equal(cleanResult.isError, false);
+			assert.equal((cleanResult.details?.qaPreset as { passed?: boolean } | undefined)?.passed, true);
 			assert.deepEqual((cleanResult.details?.qaPreset as { failedChecks?: string[] } | undefined)?.failedChecks, []);
-			assert.match((cleanResult.content[0] as { text: string }).text, /QA preset passed with warnings/);
-			assert.match((cleanResult.content[0] as { text: string }).text, /post-clear page error residue/);
+			assert.deepEqual((cleanResult.details?.qaPreset as { warnings?: string[] } | undefined)?.warnings, []);
+			assert.match((cleanResult.content[0] as { text: string }).text, /QA preset passed\./);
 			assert.match((cleanResult.content[0] as { text: string }).text, /Page: QA Page — https:\/\/example\.test\//);
 			assert.match((cleanResult.content[0] as { text: string }).text, /Checks run:/);
 			assert.match((cleanResult.content[0] as { text: string }).text, /Full diagnostic matrix: see details\.qaPreset and details\.batchSteps\./);
 			assert.doesNotMatch((cleanResult.content[0] as { text: string }).text, /Step 1 —/);
 			assert.ok(Array.isArray(cleanResult.details?.batchSteps) && (cleanResult.details?.batchSteps as unknown[]).length > 0);
+
+			await withPatchedEnv({ AGENT_BROWSER_FAKE_QA_MODE: "residue" }, async () => {
+				const ambiguous = await executeRegisteredTool(harness.tool, harness.ctx, { qa: { url: "https://example.test/" } });
+				assert.equal((ambiguous.details?.qaPreset as { passed?: boolean } | undefined)?.passed, false);
+				assert.equal(ambiguous.isError, true);
+				assert.equal(ambiguous.details?.resultCategory, "failure");
+				assert.equal(ambiguous.details?.failureCategory, "qa-failure");
+				assert.deepEqual((ambiguous.details?.qaPreset as { failedChecks?: string[] } | undefined)?.failedChecks, [
+					"page-error check could not be verified (1 row(s) matched the post-clear baseline; old residue and identical new errors are indistinguishable)",
+				]);
+				assert.match(ambiguous.content[0]?.text ?? "", /page-error check could not be verified/);
+				assert.doesNotMatch(ambiguous.content[0]?.text ?? "", /QA preset passed|unchanged|1 page error\(s\)/);
+				const [patch] = await runExtensionEventResults<{ content?: Array<{ text?: string }>; isError?: boolean }>(
+					harness.handlers, "tool_result",
+					{ content: ambiguous.content, details: ambiguous.details, isError: false, toolName: "agent_browser" },
+				);
+				assert.equal(patch?.isError, true);
+				assert.match(patch?.content?.[0]?.text ?? "", /failureCategory: qa-failure; Pi tool isError: true/);
+
+				const disabled = await executeRegisteredTool(harness.tool, harness.ctx, { qa: { url: "https://example.test/", checkErrors: false } });
+				assert.equal((disabled.details?.qaPreset as { passed?: boolean } | undefined)?.passed, true);
+				assert.equal(disabled.isError, false);
+				assert.equal(disabled.details?.resultCategory, "success");
+				const disabledSteps = (disabled.details?.compiledQaPreset as { steps: Array<{ args: string[] }> }).steps;
+				assert.equal(disabledSteps.some((step) => step.args[0] === "errors"), false);
+				const invocation = [...await readInvocationLog(logPath)].reverse().find((entry) => entry.args.includes("batch"));
+				assert.ok(invocation);
+				assert.equal((JSON.parse(invocation.stdin ?? "[]") as string[][]).some((step) => step[0] === "errors"), false);
+			});
 
 			const benignNetworkResult = await executeRegisteredTool(harness.tool, harness.ctx, {
 				qa: {
@@ -1011,12 +954,31 @@ process.stdin.on("end", () => {
 			assert.deepEqual((benignNetworkResult.details?.qaPreset as { failedChecks?: string[]; warnings?: string[] } | undefined)?.failedChecks, []);
 			assert.deepEqual((benignNetworkResult.details?.qaPreset as { warnings?: string[] } | undefined)?.warnings, [
 				"1 benign network request failure(s) ignored",
-				"1 post-clear page error residue row(s) ignored as unchanged",
 			]);
-			assert.match((benignNetworkResult.content[0] as { text: string }).text, /QA preset passed with warnings: 1 benign network request failure\(s\) ignored; 1 post-clear page error residue row\(s\) ignored as unchanged\./);
+			assert.match((benignNetworkResult.content[0] as { text: string }).text, /QA preset passed with warnings: 1 benign network request failure\(s\) ignored\./);
 			assert.match((benignNetworkResult.content[0] as { text: string }).text, /Full diagnostic matrix: see details\.qaPreset and details\.batchSteps\./);
 			assert.doesNotMatch((benignNetworkResult.content[0] as { text: string }).text, /Network failure summary:/);
 			assert.doesNotMatch((benignNetworkResult.content[0] as { text: string }).text, /Step 1 —/);
+
+			process.env.AGENT_BROWSER_FAKE_QA_MODE = "open-bail";
+			const openBailHarness = createExtensionHarness({ cwd: tempDir, sessionId: "qa-open-bail-session" });
+			await runExtensionEvent(openBailHarness.handlers, "session_start", { reason: "new" }, openBailHarness.ctx);
+			const openBailResult = await executeRegisteredTool(openBailHarness.tool, openBailHarness.ctx, {
+				qa: {
+					url: "https://qa.example.test/?token=secret",
+					expectedText: ["First expected text", "Second expected text", "Third expected text"],
+				},
+			});
+			const openBailText = openBailResult.content[0]?.text ?? "";
+			assert.equal(openBailResult.isError, true);
+			assert.match(openBailText, /^Error: Navigation failed: net::ERR_CERT_AUTHORITY_INVALID/);
+			assert.match(openBailText, /Not run:\n- load state: domcontentloaded/);
+			assert.match(openBailText, /expected text: "First expected text"/);
+			assert.match(openBailText, /Execution: 5\/13 batch steps/);
+			assert.doesNotMatch(openBailText, /expected text not found/);
+			assert.doesNotMatch(openBailText, /token=secret/);
+			assert.deepEqual((openBailResult.details?.qaPreset as { failedChecks?: string[]; notRunChecks?: string[] } | undefined)?.failedChecks, ["open failed"]);
+			assert.equal((openBailResult.details?.qaPreset as { notRunChecks?: string[] } | undefined)?.notRunChecks?.length, 7);
 
 			process.env.AGENT_BROWSER_FAKE_QA_MODE = "wait-fail";
 			const failedWaitQaResult = await executeRegisteredTool(harness.tool, harness.ctx, {
@@ -1026,8 +988,8 @@ process.stdin.on("end", () => {
 				},
 			});
 			assert.equal(failedWaitQaResult.isError, true);
-			assert.equal(failedWaitQaResult.details?.failureCategory, "qa-failure");
-			assert.match((failedWaitQaResult.content[0] as { text: string }).text, /QA preset failed/);
+			assert.equal(failedWaitQaResult.details?.failureCategory, "qa-failure", failedWaitQaResult.content[0]?.text);
+			assert.match((failedWaitQaResult.content[0] as { text: string }).text, /^Error: Timed out waiting for QA assertion/);
 			assert.match((failedWaitQaResult.content[0] as { text: string }).text, /Failed checks:/);
 			assert.match((failedWaitQaResult.content[0] as { text: string }).text, /Full diagnostic matrix: see details\.qaPreset and details\.batchSteps/);
 			assert.doesNotMatch((failedWaitQaResult.content[0] as { text: string }).text, /Step 1 —/);
@@ -1043,7 +1005,7 @@ process.stdin.on("end", () => {
 			});
 			assert.equal(missingQaScreenshotResult.isError, true);
 			assert.equal(missingQaScreenshotResult.details?.failureCategory, "artifact-missing");
-			assert.equal((missingQaScreenshotResult.details?.qaPreset as { passed?: boolean } | undefined)?.passed, true);
+			assert.equal((missingQaScreenshotResult.details?.qaPreset as { passed?: boolean } | undefined)?.passed, false);
 			assert.match((missingQaScreenshotResult.content[0] as { text: string }).text, /Artifact verification failed/);
 			assert.doesNotMatch((missingQaScreenshotResult.content[0] as { text: string }).text, /QA preset passed/);
 			delete process.env.AGENT_BROWSER_FAKE_QA_MODE;
@@ -1100,7 +1062,7 @@ process.stdin.on("end", () => {
 
 			const managedSessionOutcome = result.details?.managedSessionOutcome as { sessionMode?: string; status?: string; succeeded?: boolean } | undefined;
 			assert.equal(managedSessionOutcome?.sessionMode, "fresh");
-			assert.equal(managedSessionOutcome?.status, "replaced");
+			assert.equal(managedSessionOutcome?.status, "created");
 			assert.equal(managedSessionOutcome?.succeeded, false);
 			assert.match((result.content[0] as { text: string }).text, /Managed session outcome: Fresh launch became current, but this tool call failed after launch\./);
 			assert.match((result.content[0] as { text: string }).text, /failureCategory \/ qaPreset/);
@@ -1203,13 +1165,22 @@ process.stdin.on("end", () => {
 			});
 			assert.equal(attachedCheckedResult.isError, true);
 			assert.equal(attachedCheckedResult.details?.failureCategory, "qa-failure");
-			assert.match((attachedCheckedResult.content[0] as { text: string }).text, /QA preset failed/);
+			assert.match((attachedCheckedResult.content[0] as { text: string }).text, /^QA preset failed/);
 			assert.match((attachedCheckedResult.content[0] as { text: string }).text, /Attached diagnostics: existing upstream session console\/network\/error buffers were preserved/);
 			assert.deepEqual((attachedCheckedResult.details?.qaPreset as { failedChecks?: string[] } | undefined)?.failedChecks, [
 				"1 actionable failed network request(s)",
 				"1 console error message(s)",
 				"1 page error(s)",
 			]);
+
+			process.env.AGENT_BROWSER_FAKE_QA_MODE = "assertion-fail";
+			const attachedAssertionFailure = await executeRegisteredTool(harness.tool, harness.ctx, {
+				qa: { attached: true, expectedText: "Missing text", expectedSelector: "main" },
+			});
+			assert.equal(attachedAssertionFailure.isError, true);
+			assert.match(attachedAssertionFailure.content[0]?.text ?? "", /^Error: Timed out waiting for QA assertion/);
+			assert.match(attachedAssertionFailure.content[0]?.text ?? "", /Not run:\n- expected selector: "main"/);
+			assert.match(attachedAssertionFailure.content[0]?.text ?? "", /QA attached target:/);
 
 			const attachedFreshResult = await executeRegisteredTool(harness.tool, harness.ctx, {
 				qa: { attached: true, expectedText: "Welcome" },

@@ -8,9 +8,9 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { chmod, link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
@@ -33,6 +33,7 @@ import {
 } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	createExtensionHarness,
+	getBrowserInstructions,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
@@ -47,55 +48,31 @@ import {
 	createRenderContext,
 } from "./helpers/extension-validation-fixtures.js";
 
-test("agentBrowserExtension names its tools in every prompt guideline", () => {
-	const harness = createExtensionHarness({ cwd: process.cwd(), prompt: "Inspect a page." });
-	assert.ok(harness.tool.promptGuidelines.length > 0);
-	for (const guideline of harness.tool.promptGuidelines) {
-		assert.match(guideline, /agent_browser/, guideline);
-	}
-	assert.match(harness.tool.promptGuidelines.find((guideline) => guideline.includes("one input mode")) ?? "", /\bscript\b/);
-	const webSearchTool = harness.getTool("agent_browser_web_search");
-	if (webSearchTool) {
-		for (const guideline of webSearchTool.promptGuidelines) {
-			assert.match(guideline, /agent_browser_web_search/, guideline);
-		}
-	}
-});
-
-test("agentBrowserExtension keeps concise browser guidance plus installed doc pointers in tool metadata", async () => {
+test("agentBrowserExtension keeps full browser guidance and installed doc pointers in its prompt section", async () => {
 	const isolatedHome = await mkdtemp(join(tmpdir(), "pi-agent-browser-guidance-test-"));
 	await withPatchedEnv({ BRAVE_API_KEY: "demo-key", EXA_API_KEY: undefined, HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: process.cwd() });
-		assert.deepEqual([...harness.handlers.keys()].sort(), ["before_agent_start", "session_shutdown", "session_start", "session_tree", "tool_call", "tool_result"]);
+		assert.deepEqual([...harness.handlers.keys()].sort(), ["before_agent_start", "session_checkpoint", "session_shutdown", "session_start", "session_tree", "tool_call", "tool_result"]);
 		assert.equal(harness.tool.name, "agent_browser");
-		assert.match(harness.tool.description, /authenticated\/profile-based browser work/);
-		assert.match(harness.tool.promptSnippet, /real web workflows/);
-		const parameterSchema = harness.tool.parameters as { description?: string; properties?: { args?: { description?: string }; stdin?: { description?: string } } };
-		assert.match(parameterSchema.description ?? "", /sourceLookup, networkSourceLookup, or electron/);
-		assert.match(parameterSchema.properties?.args?.description ?? "", /snapshot -i/);
-		const argsDescription = parameterSchema.properties?.args?.description ?? "";
-		assert.match(argsDescription, /screenshot \[selector\] \[path\] \[--full\/-f\]/);
-		assert.match(argsDescription, /record start <path> \[url\]/);
-		assert.match(argsDescription, /record restart <path> \[url\]/);
-		assert.match(argsDescription, /record stop/);
-		assert.match(argsDescription, /Paths are positional \(no --path\)/);
-		assert.match(argsDescription, /use --full, not --full-page/);
-		const stdinDescription = parameterSchema.properties?.stdin?.description ?? "";
-		assert.match(stdinDescription, /JSON array of token arrays/);
-		assert.ok(stdinDescription.includes('[["get","title"]]'));
-		assert.match(stdinDescription, /Raw text only for eval --stdin or auth save --password-stdin/);
-		assert.match(stdinDescription, /unavailable with structured modes and electron/);
+		assert.match(harness.tool.description, /native agent-browser commands/);
+		assert.match(harness.tool.promptSnippet, /native command batches/);
+		const parameterSchema = harness.tool.parameters as { properties?: Record<string, { description?: string }> };
+		assert.deepEqual(Object.keys(parameterSchema.properties ?? {}).sort(), ["args", "outputPath", "sessionMode", "stdin", "timeoutMs"]);
+		assert.match(parameterSchema.properties?.args?.description ?? "", /batch --bail/);
+		assert.match(parameterSchema.properties?.stdin?.description ?? "", /batch JSON, eval --stdin.*auth save --password-stdin/);
+		assert.match(harness.getTool("agent_browser_code")?.description ?? "", /persistent browser.*emitImage/);
+		assert.match(harness.getTool("agent_browser_tools")?.description ?? "", /adds tools.*preserves other active tools/);
 
 		const docsGuideline = buildInstalledDocsGuideline({
 			readmePath: join(process.cwd(), "README.md"),
 			commandReferencePath: join(process.cwd(), "docs", "COMMAND_REFERENCE.md"),
 			toolContractPath: join(process.cwd(), "docs", "TOOL_CONTRACT.md"),
 		});
-		const guidelineText = harness.tool.promptGuidelines.join("\n");
+		const guidelineText = await getBrowserInstructions(harness);
 		const webSearchTool = harness.getTool("agent_browser_web_search");
 		assert.ok(webSearchTool, "web search tool should register from BRAVE_API_KEY");
-		assert.equal(webSearchTool.promptGuidelines.includes(WEB_SEARCH_PROMPT_GUIDELINE), true);
-		assert.equal(harness.tool.promptGuidelines.includes("Prefer agent_browser_web_search for facts; agent_browser for pages."), true);
+		assert.equal(guidelineText.includes(WEB_SEARCH_PROMPT_GUIDELINE), true);
+		assert.equal(guidelineText.includes("Prefer agent_browser_web_search for facts; agent_browser for pages."), true);
 		const requiredGuidelines = [
 			docsGuideline,
 			...RUNTIME_PROMPT_GUIDELINES,
@@ -103,12 +80,12 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		];
 		for (const guideline of requiredGuidelines) {
 			assert.equal(
-				harness.tool.promptGuidelines.includes(guideline),
+				guidelineText.includes(guideline),
 				true,
 				`missing concise runtime guideline: ${guideline}`,
 			);
 		}
-		assert.match(guidelineText, /Use agent_browser with one input mode/);
+		assert.match(guidelineText, /agent_browser for one native command/);
 		assert.match(guidelineText, /For agent_browser, use open → snapshot -i/);
 		assert.match(guidelineText, /ordinary requested non-destructive submissions may proceed/);
 		assert.match(guidelineText, /require explicit authorization for purchases, production-control, destructive\/irreversible, or account\/security\/privacy changes/);
@@ -121,23 +98,24 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 			SHARED_BROWSER_PLAYBOOK_GUIDELINES.some((line) => line.includes("ordinary non-destructive form submissions within the requested flow may proceed without separate confirmation")),
 			true,
 		);
-		assert.match(guidelineText, /sessionMode=fresh/);
-		assert.match(guidelineText, /honors native shared-session defaults on bare calls/);
+		assert.match(guidelineText, /sessionMode:fresh/);
+		assert.match(guidelineText, /bare calls share a root Pi browser with descendants/);
 		assert.match(SHARED_BROWSER_PLAYBOOK_GUIDELINES.join("\n"), /copied Chrome profiles may omit encrypted cookies/);
 		assert.match(guidelineText, /exact user paths/);
-		assert.match(guidelineText, /requested\/configured profiles only/);
-		assert.match(guidelineText, /read <url> for docs\/text/);
-		assert.match(guidelineText, /Batch 3\+ getters/);
+		assert.match(guidelineText, /requested\/configured profiles/);
+		assert.match(guidelineText, /read <url> for text/);
+		assert.match(guidelineText, /batch --bail with JSON-array stdin for fixed sequences/);
 		assert.match(guidelineText, /get text\/html\/value\/count <selector>/);
 		assert.match(guidelineText, /get attr <selector> <name>/);
 		assert.doesNotMatch(guidelineText, /get title\/url\/text\/html\/value\/attr\/count/);
-		assert.match(guidelineText, /never pass --json/);
-		assert.match(harness.tool.description, /Input choice:/);
-		assert.match(guidelineText, /ffmpeg before recording/);
-		assert.match(guidelineText, /Dashboards: verify scroll/);
-		assert.match(guidelineText, /When agent_browser details\.nextActions exists/);
-		assert.equal(harness.tool.promptGuidelines.includes(SHARED_BROWSER_PLAYBOOK_GUIDELINES[12]), false);
-		assert.equal(harness.tool.promptGuidelines.includes(QUICK_START_GUIDELINES[0]), false);
+		assert.match(guidelineText, /Use --json only for JSON text/);
+		assert.doesNotMatch(guidelineText, /never pass --json/);
+		assert.match(harness.tool.description, /agent_browser_tools for advanced capabilities/);
+		assert.match(guidelineText, /ffmpeg before start/);
+		assert.match(guidelineText, /Verify nested scrolling/);
+		assert.match(guidelineText, /follow visible nextActions/);
+		assert.equal(guidelineText.includes(SHARED_BROWSER_PLAYBOOK_GUIDELINES[12]), true);
+		assert.equal(guidelineText.includes(QUICK_START_GUIDELINES[0]), true);
 		assert.equal(
 			SHARED_BROWSER_PLAYBOOK_GUIDELINES.some((line) => line.includes("evidence-only screenshots")),
 			true,
@@ -150,12 +128,7 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		assert.doesNotMatch(fullPlaybookText, /diff snapshot\/screenshot\/url/);
 		assert.match(fullPlaybookText, /clipboard write <text>/);
 		assert.doesNotMatch(fullPlaybookText, /clipboard read\/write\/copy\/paste/);
-		assert.ok(harness.tool.promptGuidelines.length <= 10, "promptGuidelines should stay bounded");
-		const normalizedGuidelineText = guidelineText.split(process.cwd()).join("<cwd>");
-		assert.ok(
-			normalizedGuidelineText.length < 1_850,
-			"promptGuidelines should point to docs instead of carrying the full command reference/playbook",
-		);
+		assert.deepEqual(harness.tool.promptGuidelines, [], "guidance belongs to the instruction owner, not eager tool metadata");
 		assert.equal(
 			WRAPPER_TAB_RECOVERY_BEHAVIOR.some((line) => line.includes("Routine same-session calls skip tab-list preflights")),
 			true,
@@ -164,35 +137,33 @@ test("agentBrowserExtension keeps concise browser guidance plus installed doc po
 		const [genericTurn] = await runExtensionEventResults<{ systemPrompt: string }>(
 			harness.handlers,
 			"before_agent_start",
-			{ prompt: "Please review the repository architecture.", systemPrompt: "Base system prompt" },
+			{ prompt: "Please review the repository architecture.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} } },
 			harness.ctx,
 		);
 		assert.equal(genericTurn, undefined);
 
-		const [browserTurn] = await runExtensionEventResults<{ systemPrompt: string }>(
-			harness.handlers,
-			"before_agent_start",
-			{ prompt: "Open https://example.com and take a snapshot.", systemPrompt: "Base system prompt" },
-			harness.ctx,
-		);
-		assert.equal(typeof browserTurn?.systemPrompt, "string");
-		assert.equal(browserTurn?.systemPrompt.includes("Base system prompt"), true);
-		assert.equal(browserTurn?.systemPrompt.includes("Project rule: when browser automation is needed"), true);
-		assert.equal(browserTurn?.systemPrompt.includes("Quick start:"), false);
-		assert.equal(browserTurn?.systemPrompt.includes("Browser operating playbook:"), false);
+		const browserTurn = { prompt: "Open https://example.com and take a snapshot.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} as Record<string, string> } };
+		const overrides = await runExtensionEventResults(harness.handlers, "before_agent_start", browserTurn, harness.ctx);
+		assert.deepEqual(overrides, [], "native section composition must not force a full prompt replacement");
+		assert.equal(browserTurn.systemPrompt, "Base system prompt");
+		assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /Project rule: when browser automation is needed/);
+		assert.doesNotMatch(browserTurn.systemPromptOptions.sections.agent_browser, /Quick start:|Browser operating playbook:/);
 	});
 });
 
 test("built extension prompt doc pointers resolve to package-root docs", { skip: !existsSync(resolve("dist/extensions/agent-browser/index.js")) }, async () => {
 	const extension = await import(pathToFileURL(resolve("dist/extensions/agent-browser/index.js")).href);
-	const tools: Array<{ name: string; promptGuidelines: string[] }> = [];
+	let beforeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
 	const pi = {
-		on: (..._args: unknown[]) => undefined,
-		registerTool: (tool: { name: string; promptGuidelines?: string[] }) => tools.push({ name: tool.name, promptGuidelines: tool.promptGuidelines ?? [] }),
+		events: { on: () => () => {} },
+		on: (name: string, handler: typeof beforeStart) => { if (name === "before_agent_start") beforeStart = handler; },
+		registerTool: () => {},
 	};
 	(extension.default as (api: typeof pi) => void)(pi);
 
-	const guideline = tools.find((tool) => tool.name === "agent_browser")?.promptGuidelines.find((line) => line.includes("COMMAND_REFERENCE.md"));
+	const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
+	await beforeStart!(event, { cwd: process.cwd() });
+	const guideline = event.systemPromptOptions.sections.agent_browser?.split("\n").find(line => line.includes("COMMAND_REFERENCE.md"));
 	assert.ok(guideline);
 	assert.doesNotMatch(guideline, /\/dist\/docs\//);
 	for (const docsPath of [resolve("README.md"), resolve("docs/COMMAND_REFERENCE.md"), resolve("docs/TOOL_CONTRACT.md")]) {
@@ -213,10 +184,10 @@ test("agentBrowserExtension includes configured browser executable guidance", as
 	}, null, 2), "utf8");
 	await withPatchedEnv({ HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: process.cwd() });
-		const guidelineText = harness.tool.promptGuidelines.join("\n");
+		const guidelineText = await getBrowserInstructions(harness);
 		assert.match(guidelineText, /browser\.executablePath/);
 		assert.match(guidelineText, /--executable-path/);
-		assert.match(guidelineText, /profiles command still lists Chrome profiles only/);
+		assert.match(guidelineText, /profiles lists Chrome profiles only/);
 	});
 });
 
@@ -251,15 +222,11 @@ test("agentBrowserExtension uses project browser launch guidance when project co
 				const staticGuidelineText = harness.tool.promptGuidelines.join("\n");
 				assert.doesNotMatch(staticGuidelineText, /Project Profile/);
 				assert.doesNotMatch(staticGuidelineText, /\/tmp\/project-browser/);
-				assert.match(staticGuidelineText, /Global Profile/);
-				const [browserTurn] = await runExtensionEventResults<{ systemPrompt: string }>(
-					harness.handlers,
-					"before_agent_start",
-					{ prompt: "Open https://example.com in the signed-in browser.", systemPrompt: "Base system prompt" },
-					harness.ctx,
-				);
-				assert.match(browserTurn?.systemPrompt ?? "", /Project Profile/);
-				assert.match(browserTurn?.systemPrompt ?? "", /\/tmp\/project-browser/);
+				assert.equal(staticGuidelineText, "", "no eager configuration guidelines");
+				const browserTurn = { prompt: "Open https://example.com in the signed-in browser.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} as Record<string, string> } };
+				await runExtensionEvent(harness.handlers, "before_agent_start", browserTurn, harness.ctx);
+				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /Project Profile/);
+				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /\/tmp\/project-browser/);
 			});
 		} finally {
 			process.chdir(previousCwd);
@@ -289,17 +256,13 @@ test("agentBrowserExtension includes project-local browser launch guidance", asy
 		try {
 			await withPatchedEnv({ HOME: isolatedHome, PI_AGENT_BROWSER_CONFIG: undefined }, async () => {
 				const harness = createExtensionHarness({ cwd });
-				const guidelineText = harness.tool.promptGuidelines.join("\n");
-				assert.doesNotMatch(guidelineText, /Project Profile/);
-				assert.doesNotMatch(guidelineText, /\/tmp\/project-browser/);
-				const [browserTurn] = await runExtensionEventResults<{ systemPrompt: string }>(
-					harness.handlers,
-					"before_agent_start",
-					{ prompt: "Open https://example.com with the configured browser profile.", systemPrompt: "Base system prompt" },
-					harness.ctx,
-				);
-				assert.match(browserTurn?.systemPrompt ?? "", /Project Profile/);
-				assert.match(browserTurn?.systemPrompt ?? "", /\/tmp\/project-browser/);
+				const guidelineText = await getBrowserInstructions(harness);
+				assert.match(guidelineText, /Project Profile/);
+				assert.match(guidelineText, /\/tmp\/project-browser/);
+				const browserTurn = { prompt: "Open https://example.com with the configured browser profile.", systemPrompt: "Base system prompt", systemPromptOptions: { sections: {} as Record<string, string> } };
+				await runExtensionEvent(harness.handlers, "before_agent_start", browserTurn, harness.ctx);
+				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /Project Profile/);
+				assert.match(browserTurn.systemPromptOptions.sections.agent_browser, /\/tmp\/project-browser/);
 			});
 		} finally {
 			process.chdir(previousCwd);
@@ -323,12 +286,12 @@ test("agentBrowserExtension rejects unsupported public schema fields", () => {
 	assert.equal(Check(schema, { args: ["open", "https://example.test/"], outputPath: "logs/page.json", timeoutMs: 35_000 }), true);
 	assert.equal(Check(schema, { args: ["open", "https://example.test/"], outputPath: "" }), false);
 	assert.equal(Check(schema, { args: ["open", "https://example.test/"], timeoutMs: 0 }), false);
-	assert.equal(Check(schema, { semanticAction: { action: "click", locator: "role", role: "button", name: "Open" } }), true);
+	assert.equal(Check(harness.getTool("agent_browser_action")!.parameters, { action: "click", locator: "role", role: "button", name: "Open" }), true);
 	assert.equal(Check(schema, { semanticAction: { action: "click", locator: "text", value: "Open", values: ["nope"] } }), false);
-	assert.equal(Check(schema, { semanticAction: { action: "select", selector: "#flavor", value: "chocolate" } }), true);
-	assert.equal(Check(schema, { sourceLookup: { selector: "main" } }), true);
-	assert.equal(Check(schema, { networkSourceLookup: { namespace: "review", url: "https://example.test/api" } }), true);
-	assert.equal(Check(schema, { job: { steps: [{ action: "open", url: "https://example.test/" }] } }), true);
+	assert.equal(Check(harness.getTool("agent_browser_action")!.parameters, { action: "select", selector: "#flavor", value: "chocolate" }), true);
+	assert.equal(Check(harness.getTool("agent_browser_source")!.parameters, { selector: "main" }), true);
+	assert.equal(Check(harness.getTool("agent_browser_network_source")!.parameters, { namespace: "review", url: "https://example.test/api" }), true);
+	assert.equal(Check(schema, { job: { steps: [{ action: "open", url: "https://example.test/" }] } }), false);
 });
 
 test("agentBrowserExtension rejects unsupported extra press/key args before upstream spawn", { concurrency: false }, async () => {
@@ -340,7 +303,7 @@ test("agentBrowserExtension rejects unsupported extra press/key args before upst
 		const topLevel = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["press", "@e1", "Enter"] });
 		assert.equal(topLevel.isError, true);
 		assert.match(topLevel.content[0]?.text ?? "", /accepts exactly one key argument/);
-		assert.equal(topLevel.details?.validationError, topLevel.content[0]?.text);
+		assert.equal(topLevel.details?.validationError, topLevel.content[0]?.text?.split("\n\nObservation:")[0]);
 
 		const batch = await executeRegisteredTool(harness.tool, harness.ctx, {
 			args: ["batch"],
@@ -494,7 +457,7 @@ if (command === "batch") { fs.readFileSync(0, "utf8"); process.stdout.write("[]"
 else process.stdout.write(JSON.stringify({ success: true, data: { waited: true } }));`,
 	);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 			for (const params of [
@@ -673,7 +636,7 @@ if (args.includes("dialog") || (args.includes("eval") && stdin.includes("confirm
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_DIALOG_PROCESS_TIMEOUT_MS: "50", PI_AGENT_BROWSER_DIALOG_TRIGGER_PROCESS_TIMEOUT_MS: "60" }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/", PI_AGENT_BROWSER_DIALOG_PROCESS_TIMEOUT_MS: "50", PI_AGENT_BROWSER_DIALOG_TRIGGER_PROCESS_TIMEOUT_MS: "60" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -734,7 +697,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -783,7 +746,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -833,7 +796,7 @@ process.stdin.on("end", () => {
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://fixture.test/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -884,7 +847,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://dense.example/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -896,6 +859,13 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 			assert.equal((result.details?.snapshotFilter as { search?: string; matchedRefs?: number } | undefined)?.search, "checkout");
 			assert.equal((result.details?.snapshotFilter as { matchedRefs?: number } | undefined)?.matchedRefs, 1);
 			assert.deepEqual((result.details?.refSnapshot as { refIds?: string[] } | undefined)?.refIds, ["e1", "e2", "e3"]);
+			const jsonResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--json", "snapshot", "-i", "--filter", "role=button"], outputPath: join(tempDir, "filtered.json") });
+			assert.equal(jsonResult.isError, false);
+			const envelope = JSON.parse(jsonResult.content[0]?.text ?? "");
+			assert.equal(envelope.success, true);
+			assert.deepEqual(envelope.data, jsonResult.details?.data);
+			assert.deepEqual(envelope.data.refs, { e2: { role: "button", name: "Checkout" } });
+			assert.deepEqual(JSON.parse(await readFile(join(tempDir, "filtered.json"), "utf8")), envelope.data);
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.some((entry) => entry.args.includes("--search")), false);
 			assert.ok(invocations.some((entry) => entry.args.includes("snapshot") && entry.args.includes("-i")));
@@ -932,7 +902,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://app.example/settings" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -978,7 +948,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://dense.example/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -1022,7 +992,7 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}`, PI_AGENT_BROWSER_TEST_PAGE_URL: "https://dense.example/" }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 
@@ -1058,9 +1028,9 @@ if (args.includes("get") && args.includes("url")) {
 }
 if (args.includes("network") && args.includes("requests")) {
   process.stdout.write(JSON.stringify({ success: true, data: { requests: [
-    { id: "1", method: "GET", status: 200, url: "https://shop.example/app.js" },
+    { id: "1", method: "GET", status: 200, url: "https://shop.example/app.js", headers: { Authorization: "Bearer filter-header-secret" } },
     { id: "2", method: "GET", status: 200, url: "https://cdn.example/lib.js" },
-    { id: "3", method: "POST", status: 500, url: "https://shop.example/api/cart" }
+    { id: "3", method: "POST", status: 500, url: "https://shop.example/api/cart?access_token=filter-url-secret" }
   ] } }));
   return;
 }
@@ -1082,11 +1052,20 @@ process.stdout.write(JSON.stringify({ success: true, data: { ok: true } }));`,
 			assert.equal(filter?.matchedRows, 2);
 			assert.equal(filter?.totalRows, 3);
 			const data = result.details?.data as { requests?: Array<{ url?: string }> } | undefined;
-			assert.deepEqual(data?.requests?.map((request) => request.url), ["https://shop.example/app.js", "https://shop.example/api/cart"]);
+			assert.deepEqual(data?.requests?.map((request) => request.url), ["https://shop.example/app.js", "https://shop.example/api/cart?access_token=%5BREDACTED%5D"]);
+			assert.doesNotMatch(JSON.stringify(result), /filter-header-secret|filter-url-secret/);
+			const path = join(tempDir, "filtered-network.json");
+			const jsonResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--json", "--namespace", "review", "network", "requests", "--current-page", "--filter", "https://shop.example/api/cart?access_token=filter-url-secret"], outputPath: path });
+			assert.equal(jsonResult.isError, false);
+			assert.doesNotMatch(JSON.stringify(jsonResult), /filter-header-secret|filter-url-secret/);
+			const exported = await readFile(path, "utf8");
+			assert.doesNotMatch(exported, /filter-header-secret|filter-url-secret/);
+			assert.deepEqual(JSON.parse(exported), result.details?.data);
+			assert.deepEqual(JSON.parse(jsonResult.content[0]?.text ?? "").data, result.details?.data);
 			const invocations = await readInvocationLog(logPath);
 			assert.equal(invocations.some((entry) => entry.args.includes("--current-page")), false);
 			assert.ok(invocations.every((entry) => entry.args.includes("--namespace") && entry.args.includes("review")));
-			assert.ok(invocations.some((entry) => entry.args.includes("network") && entry.args.includes("requests")));
+			assert.ok(invocations.some((entry) => entry.args.includes("network") && entry.args.includes("requests") && entry.args.includes("https://shop.example/api/cart?access_token=filter-url-secret")), "redact presentation only; native filters must retain their literal value");
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
@@ -1256,6 +1235,24 @@ if (command === "open") {
 	}
 });
 
+test("queued browser cancellation withdraws waiting work without releasing the active owner", async () => {
+	const queue = new KeyedAsyncExecutionQueue();
+	let release!: () => void;
+	let entered!: () => void;
+	const started = new Promise<void>(resolve => { entered = resolve; });
+	const held = new Promise<void>(resolve => { release = resolve; });
+	const first = queue.run("team\u0000same", "team", async () => { entered(); await held; });
+	await started;
+	const controller = new AbortController();
+	const cancelled = queue.run("team\u0000same", "team", async () => assert.fail("cancelled action dispatched"), controller.signal);
+	controller.abort();
+	await assert.rejects(cancelled, { name: "AbortError" });
+	let laterStarted = false;
+	const later = queue.run("team\u0000same", "team", async () => { laterStarted = true; });
+	await Promise.resolve(); assert.equal(laterStarted, false);
+	release(); await Promise.all([first, later]); assert.equal(laterStarted, true);
+});
+
 test("KeyedAsyncExecutionQueue drains same-namespace work without deadlocking late arrivals", async () => {
 	const queue = new KeyedAsyncExecutionQueue();
 	const key = getAgentBrowserSessionIdentityKey("shared", "team");
@@ -1358,7 +1355,7 @@ const data = command === "get" && subcommand === "url"
 process.stdout.write(JSON.stringify({ success: true, data }));`);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${nodeBinDir}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${nodeBinDir}` }, async () => {
 			const sessionName = "restart-session";
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Restart a browser recording." });
 			const started = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", sessionName, "record", "start", "z-previous.webm"] });
@@ -1399,6 +1396,8 @@ test("agentBrowserExtension makes close --all exclusive within its namespace", {
 		{ label: "current-default-ambient", named: false, callerOwned: false, override: undefined, batch: false, ambient: "Review Space", fresh: false },
 	]) {
 		const tempDir = await mkdtemp(join(tmpdir(), "piab-close-all-queue-"));
+		const cwd = join(tempDir, "g");
+		await mkdir(cwd);
 		const logPath = join(tempDir, "events.log");
 		const openGate = join(tempDir, "release-open");
 		const waitGate = join(tempDir, "release-wait");
@@ -1455,16 +1454,21 @@ process.stdout.write(JSON.stringify(command === "batch"
 			assert.fail(`${scenario.label}: ${event} did not dispatch`);
 		};
 		try {
-			await withPatchedEnv({ AGENT_BROWSER_NAMESPACE: scenario.ambient, AGENT_BROWSER_SESSION: undefined, PATH: `${tempDir}:${nodeBinDir}` }, async () => {
-				const harness = createExtensionHarness({ cwd: tempDir, prompt: "Exercise global close ordering." });
+			await withPatchedEnv({ AGENT_BROWSER_NAMESPACE: scenario.ambient, AGENT_BROWSER_SESSION: undefined, PATH: `${tempDir}${delimiter}${nodeBinDir}` }, async () => {
+				const harness = createExtensionHarness({ cwd, prompt: "Exercise global close ordering." });
+				await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
 				const pending: Array<ReturnType<typeof executeRegisteredTool>> = [];
 				try {
 					const open = executeRegisteredTool(harness.tool, harness.ctx, {
 						args: [...(scenario.named ? ["--namespace", "Review Space"] : []), "open", "https://safe.example/"],
+						sessionMode: scenario.callerOwned ? "auto" : "fresh",
 					});
 					pending.push(open);
-					const openStarted = await waitForEvent("open-start");
-					assert.match(openStarted.sessionName, /^piab-/);
+					const openStarted = await Promise.race([
+						waitForEvent("open-start"),
+						open.then(result => assert.fail(`${scenario.label}: open ended before the fixture gate: ${result.content[0]?.text}`)),
+					]);
+					assert.match(openStarted.sessionName, scenario.callerOwned ? /^pi-root-/ : /^piab-/);
 					assert.equal(openStarted.namespace, scenario.named ? "review-space" : "");
 					const namespace = scenario.override ?? (scenario.named ? "review-space" : "");
 					const matchingPrefix = namespace || scenario.ambient ? ["--namespace", namespace] : [];
@@ -1502,7 +1506,7 @@ process.stdout.write(JSON.stringify(command === "batch"
 					const otherNamespace = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--namespace", "unrelated", "--session", "other-session", "tab", "list"] });
 					assert.equal(otherNamespace.isError, false, JSON.stringify(otherNamespace));
 					const whileClosed = (await readEvents()).slice(atCloseStart);
-					assert.equal(whileClosed.some((entry) => entry.sessionName === "same-namespace" || entry.sessionName.startsWith("piab-")), false, `${scenario.label}: ${JSON.stringify(whileClosed)}`);
+					assert.equal(whileClosed.some((entry) => entry.sessionName === "same-namespace" || entry.sessionName.startsWith("piab-") || entry.sessionName.startsWith("pi-root-")), false, `${scenario.label}: ${JSON.stringify(whileClosed)}`);
 					await writeFile(closeGate, "go");
 					const [closeResult, callerResult, overlapResult] = await Promise.all([closeAll, overlappingCaller, overlappingManaged]);
 					assert.equal(closeResult.isError, false, JSON.stringify(closeResult));
@@ -1602,9 +1606,10 @@ if (firstCallFailure) process.exit(1);`,
 	);
 
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${missingFfmpegPath}`, PI_AGENT_BROWSER_SESSION_ARTIFACT_MANIFEST_MAX_ENTRIES: "1" }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${missingFfmpegPath}`, PI_AGENT_BROWSER_SESSION_ARTIFACT_MANIFEST_MAX_ENTRIES: "1" }, async () => {
 			const firstCallHarness = createExtensionHarness({ cwd: tempDir, prompt: "Test failed post-close launch ownership.", sessionFile: join(tempDir, "first-call-session.jsonl") });
 			const failedFirstCall = await executeRegisteredTool(firstCallHarness.tool, firstCallHarness.ctx, {
+				sessionMode: "fresh",
 				args: ["batch"],
 				stdin: JSON.stringify([["close"], ["click", "#missing-after-close"]]),
 			});
@@ -1639,7 +1644,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.match(retainedOtherNamespace.content[0]?.text ?? "", /reserved by an active recording/);
 			await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--namespace", "other", "close", "--all"] });
 
-			const missingResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["record", "--quiet", "start", "demo.webm"] });
+			const missingResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["record", "--quiet", "start", "demo.webm"], sessionMode: "fresh" });
 			assert.equal(missingResult.isError, false);
 			assert.equal(missingResult.details?.successCategory, "artifact-pending");
 			assert.deepEqual(
@@ -1685,14 +1690,14 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal(reservedQuickPdf.isError, true);
 			assert.match(reservedQuickPdf.content[0]?.text ?? "", /demo\.webm is reserved by an active recording/);
 			const noiseManifest = noise.details?.artifactManifest as { entries?: Array<{ subcommand?: string }> } | undefined;
-			assert.equal(noiseManifest?.entries?.some((entry) => entry.subcommand === "start"), false);
+			assert.equal((noiseManifest?.entries ?? []).some((entry) => entry.subcommand === "start"), false);
 			const reservedOutputPath = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "title"], outputPath: "demo.webm" });
 			assert.equal(reservedOutputPath.isError, true);
 			assert.match(reservedOutputPath.content[0]?.text ?? "", /Unsupported outputPath: demo\.webm is reserved by an active recording/);
 			const reservedAtOutputPath = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "title"], outputPath: "@demo.webm" });
 			assert.equal(reservedAtOutputPath.isError, true);
 			assert.match(reservedAtOutputPath.content[0]?.text ?? "", /@demo\.webm is reserved by an active recording/);
-			const reservedScriptOutputPath = await executeRegisteredTool(harness.tool, harness.ctx, { script: "emit({ ok: true });", outputPath: "demo.webm" });
+			const reservedScriptOutputPath = await executeRegisteredTool(harness.getTool("agent_browser_code")!, harness.ctx, { code: "emit({ ok: true });", outputPath: "demo.webm" });
 			assert.equal(reservedScriptOutputPath.isError, true);
 			assert.match(reservedScriptOutputPath.content[0]?.text ?? "", /demo\.webm is reserved by an active recording/);
 			const reservedElectronOutputPath = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "status", all: true }, outputPath: "demo.webm" });
@@ -1759,7 +1764,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal(closed.isError, false);
 			if (process.platform !== "win32") await rm(join(tempDir, "demo.webm"), { force: true });
 			const closedManifest = closed.details?.artifactManifest as { entries?: Array<{ subcommand?: string }> } | undefined;
-			assert.equal(closedManifest?.entries?.some((entry) => entry.subcommand === "start" || entry.subcommand === "restart"), false);
+			assert.equal((closedManifest?.entries ?? []).some((entry) => entry.subcommand === "start" || entry.subcommand === "restart"), false);
 
 			const batchRecording = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["record", "start", "batch-close.webm"] });
 			assert.equal(batchRecording.isError, false);
@@ -1807,10 +1812,11 @@ if (firstCallFailure) process.exit(1);`,
 			});
 			assert.equal(combinedStartClose.isError, true, combinedStartClose.content[0]?.text);
 			assert.equal(combinedStartClose.details?.failureCategory, "artifact-missing");
+			const combinedCloseBranch = harness.ctx.sessionManager.getBranch().slice();
 			const releasedAfterCombinedStartClose = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["pdf", "batch-start-close.webm"] });
 			assert.doesNotMatch(releasedAfterCombinedStartClose.content[0]?.text ?? "", /reserved by an active recording/);
 			const combinedManifest = combinedStartClose.details?.artifactManifest as { entries?: Array<{ path?: string; subcommand?: string }> } | undefined;
-			assert.equal(combinedManifest?.entries?.some((entry) => entry.path === "batch-start-close.webm" && entry.subcommand === "start"), false);
+			assert.equal((combinedManifest?.entries ?? []).some((entry) => entry.path === "batch-start-close.webm" && entry.subcommand === "start"), false);
 			const combinedArtifacts = combinedStartClose.details?.artifacts as Array<{ path?: string; recordingState?: string; status?: string; subcommand?: string; willExistOnStop?: boolean }> | undefined;
 			assert.deepEqual(combinedArtifacts?.map((artifact) => ({ path: artifact.path, recordingState: artifact.recordingState, status: artifact.status, subcommand: artifact.subcommand, willExistOnStop: artifact.willExistOnStop })), [{ path: "batch-start-close.webm", recordingState: undefined, status: "missing", subcommand: "close-abandoned", willExistOnStop: undefined }]);
 			const combinedVerification = combinedStartClose.details?.artifactVerification as { missingCount?: number; pendingCount?: number } | undefined;
@@ -1820,7 +1826,7 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal((combinedStartClose.details?.managedSessionOutcome as { activeAfter?: boolean; status?: string } | undefined)?.activeAfter, false);
 			assert.equal((combinedStartClose.details?.managedSessionOutcome as { activeAfter?: boolean; status?: string } | undefined)?.status, "closed");
 			const replayHarness = createExtensionHarness({
-				branch: [activeBeforeCombined, combinedStartClose].map((result) => ({ type: "message", message: { details: result.details, isError: result.isError, toolName: "agent_browser" } })),
+				branch: combinedCloseBranch,
 				cwd: tempDir,
 			});
 			await runExtensionEvent(replayHarness.handlers, "session_start", { reason: "resume" }, replayHarness.ctx);
@@ -1868,9 +1874,10 @@ if (firstCallFailure) process.exit(1);`,
 			});
 			assert.equal(orderedBatchRestart.isError, true);
 			assert.equal((orderedBatchRestart.details?.nextActions as Array<{ id?: string }> | undefined)?.some((action) => action.id === "stop-pending-recording"), true);
-			const orderedManifest = orderedBatchRestart.details?.artifactManifest as { entries?: Array<{ path?: string; subcommand?: string }> } | undefined;
-			assert.equal(orderedManifest?.entries?.some((entry) => entry.path === "ordered-new.webm" && entry.subcommand === "start"), true);
-			assert.equal(orderedManifest?.entries?.some((entry) => entry.path === "ordered-new.webm" && entry.subcommand === "close-abandoned"), false);
+			// A final observation spill can occupy the one-row manifest; current artifacts and reservations must survive.
+			const orderedArtifacts = orderedBatchRestart.details?.artifacts as Array<{ path?: string; subcommand?: string }> | undefined;
+			assert.equal(orderedArtifacts?.some((entry) => entry.path === "ordered-new.webm" && entry.subcommand === "start"), true);
+			assert.equal(orderedArtifacts?.some((entry) => entry.path === "ordered-new.webm" && entry.subcommand === "close-abandoned"), false);
 			await rm(noRecordingMarker, { force: true });
 			const releasedOrderedOld = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["pdf", "ordered-old.webm"] });
 			assert.doesNotMatch(releasedOrderedOld.content[0]?.text ?? "", /reserved by an active recording/);
@@ -1898,8 +1905,9 @@ if (firstCallFailure) process.exit(1);`,
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["close"] })).isError, false);
 
 			await rm(join(tempDir, "ffmpeg"), { recursive: true, force: true });
-			await writeFile(join(tempDir, "ffmpeg"), "#!/bin/sh\nexit 0\n", "utf8");
-			await chmod(join(tempDir, "ffmpeg"), 0o755);
+			const ffmpeg = join(tempDir, process.platform === "win32" ? "ffmpeg.cmd" : "ffmpeg");
+			await writeFile(ffmpeg, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n", "utf8");
+			if (process.platform !== "win32") await chmod(ffmpeg, 0o755);
 			const presentResult = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["record", "start", "present.webm"], sessionMode: "fresh" });
 			assert.equal(presentResult.isError, false);
 			assert.equal((presentResult.details as { recordingDependencyWarning?: unknown }).recordingDependencyWarning, undefined);
@@ -1945,7 +1953,7 @@ const data = command === "open" ? { title: "Example", url: subcommand }
   : { command, subcommand, path };
 process.stdout.write(JSON.stringify({ success: true, data }));`);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${nodeBinDir}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${nodeBinDir}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Keep recording identities isolated." });
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--namespace", "one", "--session", "shared", "open", "https://example.test/"] })).isError, false);
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--namespace", "two", "--session", "shared", "open", "https://example.test/"] })).isError, false);
@@ -1990,7 +1998,7 @@ const data = command === "open" ? { title: "Example", url: subcommand }
   : { command, subcommand, path };
 process.stdout.write(JSON.stringify({ success: true, data }));`);
 	try {
-		await withPatchedEnv({ PATH: `${tempDir}:${nodeBinDir}` }, async () => {
+		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${nodeBinDir}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir, prompt: "Keep cross-branch recording state safe." });
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "shared", "open", "https://example.test/"] })).isError, false);
 			assert.equal((await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", "shared", "record", "start", "branch.webm"] })).isError, false);
@@ -2059,13 +2067,13 @@ test("agentBrowserExtension renders long TUI output compactly without changing m
 	assert.match(semanticActionCallText, /<dim>→<\/dim> <accent>find text Definitely Missing Button click<\/accent>/);
 
 	const scriptSource = `const rows = [];\n${"rows.push('visible source'); ".repeat(12)}\n// osc-hidden line\x1B]0;\rawait browser({ args: ["get", "title"] }); //\x07\n// browser call follows\rawait browser({ args: ["get", "url"] });\u2028emit(rows);\x1B[31m\u202E\u200B`;
-	const scriptParams: AgentBrowserToolParams = { script: scriptSource };
+	const scriptParams: AgentBrowserToolParams = { code: scriptSource };
 	const collapsedScriptCallText = renderCall(
 		scriptParams,
 		PLAIN_RENDER_THEME,
 		createRenderContext({ args: scriptParams }),
 	).render(200).join("\n");
-	assert.match(collapsedScriptCallText, /<accent>script<\/accent>/);
+	assert.match(collapsedScriptCallText, /<toolTitle>\*\*agent_browser_code\*\*<\/toolTitle>/);
 	assert.match(collapsedScriptCallText, /const rows = \[\]/);
 	assert.match(collapsedScriptCallText, /↵/);
 	assert.match(collapsedScriptCallText, /\.\.\.<\/accent>/);

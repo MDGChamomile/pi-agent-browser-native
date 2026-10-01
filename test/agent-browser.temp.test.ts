@@ -14,12 +14,45 @@ import test from "node:test";
 
 import {
 	cleanupSecureTempArtifacts,
+	getPersistentSessionArtifactMaxBytes,
 	getSecureTempDebugState,
+	getSecureTempRootMaxBytes,
 	openSecureTempFile,
+	writePersistentSessionArtifactFile,
 	writeSecureTempFile,
 	writeSecureTempRootOwnershipMarker,
 } from "../extensions/agent-browser/lib/temp.js";
-import { readChildStdoutJsonLine, stopChildProcess, withPatchedEnv } from "./helpers/agent-browser-harness.js";
+import { readChildStdoutJsonLine, stopChildProcess, TEST_SESSION_ID, withPatchedEnv } from "./helpers/agent-browser-harness.js";
+
+test("persistent session artifact budget accepts zero without changing bounded defaults", () => {
+	const defaultBytes = 32 * 1_024 * 1_024;
+	assert.equal(getPersistentSessionArtifactMaxBytes({}), defaultBytes);
+	assert.equal(getPersistentSessionArtifactMaxBytes({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES: "0" }), 0);
+	assert.equal(getPersistentSessionArtifactMaxBytes({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES: " 0 " }), 0);
+	assert.equal(getPersistentSessionArtifactMaxBytes({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES: " 01024 " }), 1_024);
+	for (const value of ["", "invalid", "-1", "1.5", "00", "-0", "0.0", "0e0", "9007199254740992"]) {
+		assert.equal(getPersistentSessionArtifactMaxBytes({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES: value }), defaultBytes, value);
+	}
+	assert.equal(getSecureTempRootMaxBytes({ PI_AGENT_BROWSER_TEMP_ROOT_MAX_BYTES: "0" }), defaultBytes);
+});
+
+test("writePersistentSessionArtifactFile preserves earlier files with a zero budget", { concurrency: false }, async () => {
+	const sessionDir = await mkdtemp(join(tmpdir(), "pi-session-unlimited-"));
+	const store = { sessionDir, sessionId: TEST_SESSION_ID };
+	try {
+		await withPatchedEnv({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES: "0" }, async () => {
+			const earlier = await writePersistentSessionArtifactFile({ content: "earlier output", prefix: "earlier", suffix: ".txt", store });
+			const latest = await writePersistentSessionArtifactFile({ content: Buffer.alloc(32 * 1_024 * 1_024, "a"), prefix: "latest", suffix: ".bin", store });
+
+			assert.equal(await readFile(earlier.path, "utf8"), "earlier output");
+			assert.equal((await stat(latest.path)).size, 32 * 1_024 * 1_024);
+			assert.deepEqual(earlier.evictedArtifacts, []);
+			assert.deepEqual(latest.evictedArtifacts, []);
+		});
+	} finally {
+		await rm(sessionDir, { force: true, recursive: true });
+	}
+});
 
 const originalTempEnv = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
 let suiteTempDir: string;
@@ -93,7 +126,8 @@ test("stale temp pruning only removes explicitly owned roots", { concurrency: fa
 	}
 });
 
-test("stale temp pruning bounds each allocation and advances past retained roots", { concurrency: false }, async () => {
+for (const shortLived of [false, true]) {
+test(`stale temp pruning bounds each allocation and advances past retained roots${shortLived ? " across short-lived processes" : ""}`, { concurrency: false }, async () => {
 	await cleanupSecureTempArtifacts();
 	const tempDir = await mkdtemp(join(tmpdir(), "bounded-temp-gc-"));
 	try {
@@ -110,8 +144,37 @@ test("stale temp pruning bounds each allocation and advances past retained roots
 			}
 			let remaining = 20;
 			for (let attempt = 0; attempt < 8 && remaining > 8; attempt += 1) {
-				const file = await openSecureTempFile("bounded-gc", ".txt");
-				await file.fileHandle.close();
+				if (shortLived) {
+					const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+						import crypto from "node:crypto";
+						import fs from "node:fs/promises";
+						import { syncBuiltinESMExports } from "node:module";
+						// Control only the random draw, never ownership or filesystem results.
+						crypto.randomInt = (max) => Math.min(8, max - 1);
+						let reads = 0;
+						const readFile = fs.readFile;
+						fs.readFile = (...args) => {
+							if (/pi-agent-browser-\\d{2}[/\\\\]\\.pi-agent-browser-owner\\.json$/.test(String(args[0]))) reads++;
+							return readFile(...args);
+						};
+						syncBuiltinESMExports();
+						const { openSecureTempFile, cleanupSecureTempArtifacts } = await import("./extensions/agent-browser/lib/temp.ts");
+						const file = await openSecureTempFile("bounded-gc", ".txt");
+						await file.fileHandle.close();
+						await cleanupSecureTempArtifacts();
+						console.log(JSON.stringify({ done: true, reads }));
+					`], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+					const exited = once(child, "exit");
+					try {
+						const receipt = await readChildStdoutJsonLine<{ done: boolean; reads: number }>(child);
+						assert.equal(receipt.done, true);
+						assert.ok(receipt.reads <= 8, "retained roots count against the inspection limit");
+						assert.equal((await exited)[0], 0);
+					} finally { await stopChildProcess(child); }
+				} else {
+					const file = await openSecureTempFile("bounded-gc", ".txt");
+					await file.fileHandle.close();
+				}
 				const after = (await readdir(tempDir)).filter((name) => /^pi-agent-browser-\d{2}$/.test(name)).length;
 				assert.ok(remaining - after <= 8, "one allocation must not sweep all stale roots");
 				remaining = after;
@@ -124,6 +187,7 @@ test("stale temp pruning bounds each allocation and advances past retained roots
 		await rm(tempDir, { recursive: true, force: true });
 	}
 });
+}
 
 test("stale temp pruning removes roots whose marker PID was reused", { concurrency: false }, async () => {
 	await cleanupSecureTempArtifacts();

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +12,7 @@ const TEMP_ROOT_MARKER_KIND = "pi-agent-browser-temp-root";
 const TEMP_ROOT_MARKER_VERSION = 2;
 const STALE_TEMP_ROOT_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 const STALE_TEMP_ROOT_BATCH_SIZE = 8;
-let lastTempGcName = "";
+let lastTempGcName: string | undefined;
 const TEMP_ROOT_MAX_BYTES_ENV = "PI_AGENT_BROWSER_TEMP_ROOT_MAX_BYTES";
 const DEFAULT_TEMP_ROOT_MAX_BYTES = 32 * 1_024 * 1_024;
 const SESSION_ARTIFACT_MAX_BYTES_ENV = "PI_AGENT_BROWSER_SESSION_ARTIFACT_MAX_BYTES";
@@ -288,9 +288,11 @@ async function pruneStaleTempRoots(currentTempRoot: string): Promise<void> {
 	// ponytail: list/sort all names; stream directories if enumeration becomes the bottleneck.
 	const candidates = entries.filter((entry) => entry.isDirectory() && entry.name.startsWith(TEMP_ROOT_PREFIX))
 		.map((entry) => entry.name).sort();
-	const start = Math.max(0, candidates.findIndex((name) => name > lastTempGcName));
-	const batch = [...candidates.slice(start), ...candidates.slice(0, start)].slice(0, STALE_TEMP_ROOT_BATCH_SIZE);
-	lastTempGcName = batch.at(-1) ?? "";
+	if (candidates.length === 0) return;
+	const start = lastTempGcName === undefined ? randomInt(candidates.length)
+		: Math.max(0, candidates.findIndex((name) => name > lastTempGcName!));
+	const batch = Array.from({ length: Math.min(STALE_TEMP_ROOT_BATCH_SIZE, candidates.length) }, (_, offset) => candidates[(start + offset) % candidates.length]!);
+	lastTempGcName = batch.at(-1);
 	await Promise.all(
 		batch.map(async (name) => {
 			const path = join(tmpdir(), name);
@@ -365,6 +367,7 @@ export function getSecureTempRootMaxBytes(env: NodeJS.ProcessEnv = process.env):
 }
 
 export function getPersistentSessionArtifactMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+	if (env[SESSION_ARTIFACT_MAX_BYTES_ENV]?.trim() === "0") return 0;
 	return parsePositiveInteger(env[SESSION_ARTIFACT_MAX_BYTES_ENV]) ?? DEFAULT_SESSION_ARTIFACT_MAX_BYTES;
 }
 
@@ -435,6 +438,7 @@ async function prunePersistentSessionArtifactsToBudget(
 ): Promise<PersistentSessionArtifactEviction[]> {
 	if (additionalBytes <= 0) return [];
 	const maxBytes = getPersistentSessionArtifactMaxBytes();
+	if (maxBytes === 0) return [];
 	let files = await listArtifactFiles(sessionArtifactDir);
 	let totalBytes = files.reduce((total, file) => total + file.size, 0);
 	if (totalBytes + additionalBytes <= maxBytes) {

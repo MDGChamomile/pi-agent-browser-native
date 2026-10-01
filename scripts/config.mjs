@@ -363,7 +363,7 @@ export async function main(argv = process.argv.slice(2)) {
 	throw new UsageError(`Unknown command: ${command}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
 	main().catch((error) => {
 		if (error instanceof UsageError) {
 			console.error(error.message);

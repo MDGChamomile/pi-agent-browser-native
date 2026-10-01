@@ -1,5 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
+import { getImageDimensions } from "@earendil-works/pi-tui";
 
 import { getAgentBrowserSessionIdentityKey } from "../../argv-grammar.js";
 import { getExplicitArtifactDestination } from "../../orchestration/browser-run/artifact-paths.js";
@@ -13,6 +14,7 @@ import {
 	mergeSessionArtifactManifest,
 } from "../artifact-manifest.js";
 import { classifyAgentBrowserSuccessCategory } from "../categories.js";
+import { formatRecordingReceipt, getRecordingReceipt, type RecordingReceipt } from "../recording.js";
 import type {
 	ArtifactVerificationEntry,
 	ArtifactVerificationSummary,
@@ -92,6 +94,7 @@ export function applyArtifactManifest(presentation: ToolPresentation, baseManife
 }
 
 export function getScreenshotSummary(data: Record<string, unknown>): string | undefined {
+	if (data.changed === false) return "Screenshot unchanged; no image saved.";
 	return typeof data.path === "string" ? `Saved image: ${data.path}` : undefined;
 }
 
@@ -176,11 +179,15 @@ async function buildFileArtifactMetadata(options: {
 	artifactRequest?: ArtifactRequestContext;
 	commandInfo: CommandInfo;
 	cwd: string;
+	kind?: FileArtifactKind;
 	namespace?: string;
 	path: string;
+	recording?: RecordingReceipt;
+	recordingOutcome?: boolean;
+	recordingPending?: boolean;
 	sessionName?: string;
 }): Promise<FileArtifactMetadata | undefined> {
-	const kind = getArtifactKind(options.commandInfo);
+	const kind = options.kind ?? getArtifactKind(options.commandInfo);
 	if (!kind) {
 		return undefined;
 	}
@@ -188,23 +195,25 @@ async function buildFileArtifactMetadata(options: {
 	const absolutePath = options.artifactRequest?.absolutePath ?? resolve(options.cwd, options.path);
 	const displayPath = options.artifactRequest?.path ?? options.path;
 	const extension = extname(absolutePath || options.path).toLowerCase() || undefined;
-	const pendingRecording = isPendingRecordingCommand(options.commandInfo.command, options.commandInfo.subcommand, kind);
+	const pendingRecording = options.recordingPending === true || (isPendingRecordingCommand(options.commandInfo.command, options.commandInfo.subcommand, kind) && options.recordingOutcome !== false && options.recording?.success !== false);
+	const captureStartedAtMs = options.recording?.capture.startedAt ? Date.parse(options.recording.capture.startedAt) : NaN;
+	const recordingStartedAtMs = Number.isFinite(captureStartedAtMs) ? captureStartedAtMs : options.artifactMinUpdatedAtMs;
 	let exists: boolean | undefined;
 	let sizeBytes: number | undefined;
 	let mediaType: string | undefined;
 	let stale = false;
 	let updatedAtMs: number | undefined;
-	if (!pendingRecording) {
+	if (!pendingRecording || options.commandInfo.subcommand === "stop") {
 		try {
 			const fileStats = await stat(absolutePath);
-			exists = true;
+			exists = fileStats.isFile();
 			sizeBytes = fileStats.size;
 			updatedAtMs = fileStats.mtimeMs;
 			mediaType = fileStats.isFile() ? await getFileImageMimeType(absolutePath) : undefined;
 			const commandCreatesArtifact = !(options.commandInfo.command === "wait" && isDownloadWaitSubcommand(options.commandInfo.subcommand));
-			stale = commandCreatesArtifact && artifactMtimeIsOutsideCommandWindow(updatedAtMs, options.artifactMinUpdatedAtMs, options.artifactMaxUpdatedAtMs);
-		} catch {
-			exists = false;
+			stale = commandCreatesArtifact && artifactMtimeIsOutsideCommandWindow(updatedAtMs, kind === "video" ? recordingStartedAtMs : options.artifactMinUpdatedAtMs, options.artifactMaxUpdatedAtMs);
+		} catch (error) {
+			exists = ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "") ? false : undefined;
 		}
 	}
 
@@ -219,11 +228,17 @@ async function buildFileArtifactMetadata(options: {
 		mediaType,
 		namespace: options.namespace,
 		path: displayPath,
+		recording: options.recording,
+		recordingStartedAtMs: kind === "video" ? recordingStartedAtMs : undefined,
 		recordingState: pendingRecording ? "openRecording" : undefined,
 		requestedPath: options.artifactRequest?.path ?? getExplicitArtifactDestination(options.commandInfo.commandTokens ?? []),
 		session: options.sessionName,
 		sizeBytes,
-		status: pendingRecording ? "pending" : exists === false ? "missing" : stale ? "stale" : options.artifactRequest?.status ?? "saved",
+		status: pendingRecording ? "pending" : exists !== true ? exists === false ? "missing" : "unverified" : stale ? "stale"
+			: kind === "video" && (options.recording?.success === false || options.recording?.output.encoderSucceeded === false || (options.recordingOutcome === false && options.recording?.success !== null)) ? "failed"
+			: kind === "video" && ((options.recording?.success !== true && options.recordingOutcome !== true)
+				|| (options.recording?.file.sizeBytes != null && options.recording.file.sizeBytes !== sizeBytes)) ? "unverified"
+			: options.artifactRequest?.status ?? "saved",
 		subcommand: options.commandInfo.subcommand,
 		tempPath: options.artifactRequest?.tempPath,
 		updatedAtMs,
@@ -232,6 +247,7 @@ async function buildFileArtifactMetadata(options: {
 }
 
 async function buildPreviousRestartRecordingArtifact(options: {
+	data: unknown;
 	artifactManifest?: SessionArtifactManifest;
 	artifactMaxUpdatedAtMs?: number;
 	artifactMinUpdatedAtMs?: number;
@@ -241,6 +257,10 @@ async function buildPreviousRestartRecordingArtifact(options: {
 	sessionName?: string;
 }): Promise<FileArtifactMetadata | undefined> {
 	if (options.commandInfo.command !== "record" || options.commandInfo.subcommand !== "restart") return undefined;
+	if (isRecord(options.data) && "previousRecording" in options.data) {
+		const recording = getRecordingReceipt(options.data.previousRecording);
+		return recording ? buildFileArtifactMetadata({ ...options, commandInfo: { command: "record", subcommand: "restart-previous" }, path: recording.path, recording }) : undefined;
+	}
 	const sessionKey = options.sessionName ? getAgentBrowserSessionIdentityKey(options.sessionName, options.namespace) : undefined;
 	const previousRecording = options.artifactManifest?.entries.find((entry) => (
 		entry.command === "record" &&
@@ -271,11 +291,12 @@ async function buildPreviousRestartRecordingArtifact(options: {
 			exists: true,
 			mediaType: fileStats.isFile() ? await getFileImageMimeType(absolutePath) : undefined,
 			sizeBytes: fileStats.size,
-			status: stale ? "stale" : "saved",
+			status: stale ? "stale" : "unverified",
 			updatedAtMs: fileStats.mtimeMs,
 		};
-	} catch {
-		return { ...base, exists: false, status: "missing" };
+	} catch (error) {
+		const missing = ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "");
+		return { ...base, exists: missing ? false : undefined, status: missing ? "missing" : "unverified" };
 	}
 }
 
@@ -288,11 +309,27 @@ export async function extractFileArtifacts(options: {
 	cwd: string;
 	data: unknown;
 	namespace?: string;
+	recordingOutcome?: boolean;
+	recordingPending?: boolean;
+	previousRecordingContactSheetPath?: string;
 	sessionName?: string;
 }): Promise<FileArtifactMetadata[]> {
+	if (options.commandInfo.command === "screenshot" && isRecord(options.data) && options.data.changed === false) return [];
 	const candidates = extractPathStrings(options.data);
-	const currentArtifacts = (await Promise.all(candidates.map((path) => buildFileArtifactMetadata({ ...options, path })))).filter((artifact): artifact is FileArtifactMetadata => artifact !== undefined);
-	const previousRestartRecordingArtifact = await buildPreviousRestartRecordingArtifact({ artifactManifest: options.artifactManifest, artifactMaxUpdatedAtMs: options.artifactMaxUpdatedAtMs, artifactMinUpdatedAtMs: options.artifactMinUpdatedAtMs, commandInfo: options.commandInfo, cwd: options.cwd, namespace: options.namespace, sessionName: options.sessionName });
+	const recording = options.commandInfo.command === "record" ? getRecordingReceipt(options.data, options.commandInfo.subcommand === "stop" ? options.recordingOutcome : undefined) : undefined;
+	const recordingPending = options.recordingPending ?? (recording?.success === null && isRecord(options.data) && isRecord(options.data.capture) && recording.capture.endedAt === null);
+	const currentArtifacts = (await Promise.all(candidates.map((path) => buildFileArtifactMetadata({ ...options, path, recording, recordingPending })))).filter((artifact): artifact is FileArtifactMetadata => artifact !== undefined);
+	if (options.commandInfo.command === "record" && isRecord(options.data) && typeof options.data.contactSheetPath === "string" && options.data.contactSheetPath.trim() && !isNonFileArtifactPathCandidate(options.data.contactSheetPath)) {
+		const sheet = await buildFileArtifactMetadata({ ...options, artifactRequest: undefined, kind: "image", path: options.data.contactSheetPath, recordingPending: recordingPending || ["start", "restart"].includes(options.commandInfo.subcommand ?? "") });
+		if (sheet) currentArtifacts.push({ ...sheet, requestedPath: undefined });
+	}
+	if (options.commandInfo.command === "record" && options.commandInfo.subcommand === "restart" && options.recordingOutcome === true && options.previousRecordingContactSheetPath) {
+		const previousSheet = await buildFileArtifactMetadata({ ...options, artifactRequest: undefined, commandInfo: { command: "record", subcommand: "restart-previous" }, kind: "image", path: options.previousRecordingContactSheetPath, recordingPending: false });
+		// Native restart omits the previous sheet's terminal receipt. Retain the
+		// known destination and disk evidence without inventing finalization proof.
+		if (previousSheet) currentArtifacts.unshift({ ...previousSheet, status: previousSheet.status === "saved" ? "unverified" : previousSheet.status });
+	}
+	const previousRestartRecordingArtifact = await buildPreviousRestartRecordingArtifact(options);
 	return previousRestartRecordingArtifact ? [previousRestartRecordingArtifact, ...currentArtifacts] : currentArtifacts;
 }
 
@@ -308,6 +345,10 @@ export function buildManifestEntriesForFileArtifacts(artifacts: FileArtifactMeta
 		mediaType: artifact.mediaType,
 		namespace: artifact.namespace,
 		path: artifact.path,
+		recording: artifact.recording,
+		recordingStartedAtMs: artifact.recordingStartedAtMs,
+		recordingState: artifact.recordingState,
+		status: artifact.status,
 		requestedPath: artifact.requestedPath,
 		retentionState: artifact.exists === false || artifact.status === "stale" ? "missing" : "live",
 		session: artifact.session,
@@ -318,10 +359,7 @@ export function buildManifestEntriesForFileArtifacts(artifacts: FileArtifactMeta
 }
 
 export function isManifestFileArtifact(artifact: FileArtifactMetadata): boolean {
-	if (artifact.status === "stale") {
-		return artifact.kind === "video" && artifact.command === "record" && artifact.subcommand === "restart-previous";
-	}
-	return artifact.kind === "video" && artifact.command === "record" ? true : !isPendingRecordingArtifact(artifact);
+	return artifact.kind === "video" && artifact.command === "record" ? true : artifact.status !== "stale" && !isPendingRecordingArtifact(artifact);
 }
 
 function getArtifactVerificationEntry(artifact: FileArtifactMetadata): ArtifactVerificationEntry {
@@ -330,7 +368,9 @@ function getArtifactVerificationEntry(artifact: FileArtifactMetadata): ArtifactV
 			absolutePath: artifact.absolutePath,
 			exists: artifact.exists,
 			kind: artifact.kind,
-			limitation: "Recording output is pending until record stop completes.",
+			limitation: "Recording output is pending until native finalization succeeds and the file is verified.",
+			recording: artifact.recording,
+			recordingStartedAtMs: artifact.recordingStartedAtMs,
 			mediaType: artifact.mediaType,
 			path: artifact.path,
 			recordingState: artifact.recordingState ?? "openRecording",
@@ -343,7 +383,7 @@ function getArtifactVerificationEntry(artifact: FileArtifactMetadata): ArtifactV
 			willExistOnStop: artifact.willExistOnStop ?? true,
 		};
 	}
-	const state = artifact.status === "stale"
+	const state = ["failed", "stale", "unverified"].includes(artifact.status ?? "")
 		? "unverified"
 		: artifact.exists === true
 			? "verified"
@@ -354,7 +394,11 @@ function getArtifactVerificationEntry(artifact: FileArtifactMetadata): ArtifactV
 		absolutePath: artifact.absolutePath,
 		exists: artifact.exists,
 		kind: artifact.kind,
-		limitation: artifact.status === "stale"
+		recording: artifact.recording,
+		recordingStartedAtMs: artifact.recordingStartedAtMs,
+		limitation: artifact.status === "failed" || artifact.status === "unverified"
+			? "File presence does not prove successful native recording finalization or encoding. Inspect the receipt and original failure."
+			: artifact.status === "stale"
 			? "The reported path's modification time fell outside this command's bounded artifact window. Treat the artifact as stale until regenerated."
 			: state === "missing"
 				? "The wrapper did not find the reported artifact at absolutePath. Treat the path as unverified until recovered or regenerated."
@@ -476,12 +520,15 @@ function formatArtifactLabel(artifact: FileArtifactMetadata): string {
 		case "trace":
 			return "Saved trace";
 		case "video":
+			if (artifact.status === "failed") return artifact.subcommand === "restart-previous" ? "Previous recording failed" : "Recording failed";
+			if (artifact.status === "unverified") return artifact.subcommand === "restart-previous" ? "Previous recording unverified" : "Recording unverified";
 			if (artifact.command === "record" && artifact.subcommand === "restart-previous") {
 				if (artifact.status === "stale") return "Previous recording stale";
 				if (artifact.exists === false) return "Previous recording missing";
 				return "Previous recording saved";
 			}
-			if (!isPendingRecordingArtifact(artifact)) return "Saved recording";
+			if (!isPendingRecordingArtifact(artifact)) return artifact.status === "saved" ? "Saved recording" : "Recording reported; file not verified";
+			if (artifact.subcommand === "stop") return "Recording finalization pending";
 			return artifact.subcommand === "restart" ? "Recording restarted; output will be written on stop" : "Recording started; output will be written on stop";
 	}
 }
@@ -499,7 +546,7 @@ export function formatArtifactSummary(artifacts: FileArtifactMetadata[]): string
 	if (restartArtifact && previousRecordingArtifacts.length > 0) {
 		return [...previousRecordingArtifacts, restartArtifact].map((artifact) => `${formatArtifactLabel(artifact)}: ${artifact.path}`).join("\n");
 	}
-	return `Saved ${artifacts.length} artifacts: ${artifacts.map((artifact) => `${artifact.kind} ${artifact.path}`).join(", ")}`;
+	return `${artifacts.every((artifact) => artifact.status === "saved") ? "Saved" : "Reported"} ${artifacts.length} artifacts: ${artifacts.map((artifact) => `${artifact.kind} ${artifact.path}`).join(", ")}`;
 }
 
 export function formatArtifactMetadataLines(artifacts: FileArtifactMetadata[]): string[] {
@@ -510,12 +557,13 @@ export function formatArtifactMetadataLines(artifacts: FileArtifactMetadata[]): 
 				`Artifact type: ${artifact.kind}`,
 				artifact.requestedPath ? `Requested path: ${artifact.requestedPath}` : undefined,
 				`Absolute path: ${artifact.absolutePath}`,
-				"Exists: pending until record stop",
+				`Exists: ${artifact.exists ?? "pending until record stop"}`,
 				`Status: ${artifact.status ?? "pending"}`,
 				`Recording state: ${artifact.recordingState ?? "openRecording"}`,
 				`Will exist on stop: ${artifact.willExistOnStop !== false}`,
 				artifact.session ? `Session: ${artifact.session}` : undefined,
 				artifact.cwd ? `CWD: ${artifact.cwd}` : undefined,
+				artifact.recording ? formatRecordingReceipt(artifact.recording) : undefined,
 				`Machine data: details.artifacts[${index}]`,
 			].filter((item): item is string => item !== undefined).join("\n");
 		}
@@ -525,7 +573,7 @@ export function formatArtifactMetadataLines(artifacts: FileArtifactMetadata[]): 
 			`Artifact type: ${artifact.kind}`,
 			artifact.requestedPath ? `Requested path: ${artifact.requestedPath}` : undefined,
 			`Absolute path: ${artifact.absolutePath}`,
-			`Exists: ${artifact.exists === true}`,
+			`Exists: ${artifact.exists ?? "unknown"}`,
 			artifact.exists === false ? "not found on disk" : undefined,
 			typeof artifact.sizeBytes === "number" ? `Size: ${formatByteCount(artifact.sizeBytes)}` : undefined,
 			typeof artifact.sizeBytes === "number" ? `Size bytes: ${artifact.sizeBytes}` : undefined,
@@ -534,6 +582,7 @@ export function formatArtifactMetadataLines(artifacts: FileArtifactMetadata[]): 
 			artifact.mediaType ? `Media type: ${artifact.mediaType}` : undefined,
 			artifact.session ? `Session: ${artifact.session}` : undefined,
 			artifact.cwd ? `CWD: ${artifact.cwd}` : undefined,
+			artifact.recording ? formatRecordingReceipt(artifact.recording) : undefined,
 			`Machine data: details.artifacts[${index}]`,
 		].filter((item): item is string => item !== undefined).join("\n");
 	});
@@ -588,9 +637,25 @@ export function extractImagePath(commandInfo: CommandInfo, cwd: string, data: un
 	return path?.trim() && !isNonFileArtifactPathCandidate(path) ? resolve(cwd, path) : undefined;
 }
 
-export async function attachInlineImage(presentation: ToolPresentation, imagePath: string): Promise<ToolPresentation> {
+export async function attachInlineImage(presentation: ToolPresentation, imagePath: string, modelVisible = true): Promise<ToolPresentation> {
 	try {
 		const fileStats = await stat(imagePath);
+		const handle = await open(imagePath, "r");
+		let header: Buffer;
+		try {
+			// Pi's dimension API accepts base64. Encode only a bounded header, never the whole code-mode image.
+			const bytes = Buffer.alloc(64 * 1024);
+			const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+			header = bytes.subarray(0, bytesRead);
+		} finally { await handle.close(); }
+		const mimeType = getImageMimeType(header);
+		if (!mimeType) return presentation;
+		const dimensions = getImageDimensions(header.toString("base64"), mimeType);
+		presentation.imagePath = imagePath;
+		presentation.imageObservations = [{ path: imagePath, mimeType,
+			pixels: dimensions ? { width: dimensions.widthPx, height: dimensions.heightPx } : undefined,
+			capture: "unknown", geometry: { status: "unknown", reason: dimensions ? "Capture geometry was not observed." : "Image dimensions could not be read from the bounded header." } }];
+		if (!modelVisible) return presentation;
 		const inlineImageMaxBytes = getInlineImageMaxBytes();
 		if (fileStats.size > inlineImageMaxBytes) {
 			appendPresentationNotice(
@@ -602,8 +667,6 @@ export async function attachInlineImage(presentation: ToolPresentation, imagePat
 		}
 
 		const file = await readFile(imagePath);
-		const mimeType = getImageMimeType(file);
-		if (!mimeType) return presentation;
 		presentation.content.push({ type: "image", data: file.toString("base64"), mimeType });
 		presentation.imagePath = imagePath;
 		return presentation;

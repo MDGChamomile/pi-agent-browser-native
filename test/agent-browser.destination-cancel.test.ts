@@ -61,7 +61,7 @@ const navigate = url => { current().url = url === ${JSON.stringify(requestedUrl)
 function execute(row) {
   const [command, subcommand] = row;
   if (command === 'not-a-command') throw new Error('Unknown command: not-a-command');
-  if (command === 'session') return { active: state.active, runtime: state.active ? { restoreKey: state.restoreKey } : null };
+  if (command === 'session') return { active: state.active, runtime: state.active ? { restoreKey: state.restoreKey, backgroundPid: process.ppid, socketDir: process.env.AGENT_BROWSER_SOCKET_DIR, browserLaunched: true } : null };
   if (command === 'close') { state.active = false; state.pages = []; state.restoreKey = null; return { closed: true }; }
   if (!state.active) { state.active = true; state.restoreKey = process.env.AGENT_BROWSER_RESTORE ?? null; state.pages = [{ tabId: 't1', title: 'Page', url: 'http://127.0.0.1:43210/' }]; state.selected = 't1'; }
   if (command === 'open') {
@@ -116,10 +116,12 @@ save(); process.stdout.write(JSON.stringify(output)); process.exitCode = failed 
 	try {
 		await withPatchedEnv({
 			PATH: `${root}${delimiter}${process.env.PATH ?? ""}`, HOME: home, USERPROFILE: home,
+			// Enabled-restore scenarios need the native Windows storage prerequisite too.
+			AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
 			PI_CODING_AGENT_DIR: join(root, "pi"), PI_AGENT_BROWSER_SOCKET_DIR: join(root, "s"),
 			AGENT_BROWSER_NAMESPACE: "", PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
-			const branch: unknown[] = [];
+			let branch: unknown[] = [];
 			let harness = createExtensionHarness({ branch, cwd });
 			const call: Page["call"] = async (params, signal) => {
 				let result: Awaited<ReturnType<typeof executeRegisteredTool>>;
@@ -136,11 +138,12 @@ save(); process.stdout.write(JSON.stringify(output)); process.exitCode = failed 
 			};
 			const restore = async (reason: "quit" | "reload") => {
 				await runExtensionEvent(harness.handlers, "session_shutdown", { reason }, harness.ctx);
-				harness = createExtensionHarness({ branch: structuredClone(branch), cwd });
+				branch = structuredClone(harness.ctx.sessionManager.getBranch());
+				harness = createExtensionHarness({ branch, cwd });
 				await runExtensionEvent(harness.handlers, "session_start", { reason: "resume" }, harness.ctx);
 			};
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-			const opened = await call({ args: [...(options.callerOwned ? [] : ["--namespace", namespace]), "open", rememberedUrl] });
+			const opened = await call({ args: [...(options.callerOwned ? [] : ["--namespace", namespace]), "open", rememberedUrl], sessionMode: "fresh" });
 			assert.equal(opened.isError, false, opened.content[0]?.text);
 			assert.equal(typeof opened.details?.sessionName, "string");
 			const snapshot = await call({ args: ["snapshot", "-i"] });
