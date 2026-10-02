@@ -3,7 +3,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -43,6 +43,10 @@ async function withFakeFetch<T>(handler: (input: string | URL | Request, init?: 
 	} finally {
 		globalThis.fetch = previousFetch;
 	}
+}
+
+async function pathExists(path: string): Promise<boolean> {
+	return await stat(path).then(() => true, () => false);
 }
 
 async function createFixture() {
@@ -174,8 +178,24 @@ test("--no-approve prevents project config from disabling env-backed agent_brows
 		await withTemporaryCwd(fixture.cwd, async () => {
 			await withTemporaryArgv(["node", "pi", "--no-approve"], async () => {
 				const harness = createExtensionHarness({ cwd: fixture.cwd });
-				assert.ok(harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME));
+				const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
+				assert.ok(tool);
 				assert.ok(harness.getTool("agent_browser"));
+				await withFakeFetch((input, init) => {
+					const url = new URL(String(input));
+					assert.equal(url.origin + url.pathname, "https://api.search.brave.com/res/v1/web/search");
+					assert.equal(init?.headers && (init.headers as Record<string, string>)["X-Subscription-Token"], "env-secret");
+					return new Response(JSON.stringify({
+						query: { original: "no-approve execution" },
+						web: { results: [{ title: "Env Backed Result", url: "https://example.com/env", description: "Env execution result" }] },
+					}), { status: 200 });
+				}, async () => {
+					const result = await executeRegisteredTool(tool, harness.ctx, { query: "no-approve execution", count: 1 });
+					assert.equal(result.isError, false, JSON.stringify(result));
+					assert.equal(result.details?.provider, "brave");
+					assert.match(result.content[0]?.text ?? "", /Env Backed Result/);
+					assert.doesNotMatch(JSON.stringify(result), /agent_browser_web_search is disabled by pi-agent-browser-native config/);
+				});
 			});
 		});
 	});
@@ -282,14 +302,22 @@ test("rejects explicit Exa-only filters when Brave is the resolved provider", as
 
 test("registers command-sourced config without executing command until search execution", async () => {
 	const fixture = await createFixture();
+	const fixtureRoot = dirname(fixture.overrideConfigPath);
+	const markerPath = join(fixtureRoot, "credential-command.marker");
+	const commandScriptPath = join(fixtureRoot, "credential-command.cjs");
+	await writeFile(commandScriptPath, [
+		`require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "executed");`,
+		"process.stdout.write('runtime-secret');",
+	].join("\n"), "utf8");
 	await writeJson(fixture.overrideConfigPath, {
 		version: 1,
-		webSearch: { braveApiKey: `!${process.execPath} -e "process.stdout.write('runtime-secret')"` },
+		webSearch: { braveApiKey: `!${process.execPath} ${JSON.stringify(commandScriptPath)}` },
 	});
 	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: fixture.overrideConfigPath, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined }, async () => {
 		const harness = createExtensionHarness({ cwd: fixture.cwd });
 		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
 		assert.ok(tool);
+		assert.equal(await pathExists(markerPath), false, "credential command must not execute during config load or registration");
 		await withFakeFetch((input, init) => {
 			assert.equal(new URL(String(input)).searchParams.get("q"), "pi browser docs");
 			assert.equal(init?.headers && (init.headers as Record<string, string>)["X-Subscription-Token"], "runtime-secret");
@@ -303,6 +331,7 @@ test("registers command-sourced config without executing command until search ex
 			assert.match(text, /Pi Browser/);
 			assert.doesNotMatch(JSON.stringify(result), /runtime-secret/);
 			assert.equal(result.details?.provider, "brave");
+			assert.equal(await pathExists(markerPath), true, "credential command executes at search execution");
 		});
 	});
 });

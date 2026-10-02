@@ -3,12 +3,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import {
+	AGENT_BROWSER_CONFIG_ENV,
 	BRAVE_API_KEY_ENV,
 	DEFAULT_WEB_SEARCH_PROVIDER,
 	EXA_API_KEY_ENV,
@@ -21,6 +22,11 @@ import {
 	loadAgentBrowserConfigSync,
 	resolveWebSearchCredential,
 } from "../extensions/agent-browser/lib/config.js";
+import { createExtensionHarness, getBrowserInstructions, withPatchedEnv } from "./helpers/agent-browser-harness.js";
+
+async function pathExists(path: string): Promise<boolean> {
+	return await stat(path).then(() => true, () => false);
+}
 
 async function writeJson(path: string, value: unknown): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
@@ -37,6 +43,7 @@ async function createConfigFixture() {
 		cwd,
 		env: { HOME: home, [BRAVE_API_KEY_ENV]: undefined, [EXA_API_KEY_ENV]: undefined } as NodeJS.ProcessEnv,
 		globalPath: join(home, ".pi", "config", "pi-agent-browser-native", "config.json"),
+		home,
 		projectPath: join(cwd, ".pi", "config", "pi-agent-browser-native", "config.json"),
 		root,
 	};
@@ -105,14 +112,22 @@ test("can skip project config when caller opts out", async () => {
 
 test("registers command credential sources without executing them at startup", async () => {
 	const fixture = await createConfigFixture();
+	const markerPath = join(fixture.root, "credential-command.marker");
+	const commandScriptPath = join(fixture.root, "credential-command.cjs");
+	await writeFile(commandScriptPath, [
+		`require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "executed");`,
+		"process.stdout.write('command-secret');",
+	].join("\n"), "utf8");
 	await writeJson(fixture.globalPath, {
 		version: 1,
-		webSearch: { braveApiKey: `!${process.execPath} -e "process.stdout.write('command-secret')"` },
+		webSearch: { braveApiKey: `!${process.execPath} ${JSON.stringify(commandScriptPath)}` },
 	});
 	const state = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: fixture.env });
+	assert.equal(await pathExists(markerPath), false, "credential command must not execute during config load");
 	assert.equal(canRegisterWebSearchTool(state, fixture.env), true);
 	const resolved = await resolveWebSearchCredential(state, "brave", { env: fixture.env });
 	assert.equal(resolved?.value, "command-secret");
+	assert.equal(await pathExists(markerPath), true, "credential command executes on credential resolution");
 });
 
 test("captures browser defaults with conservative profile policy and executable path", async () => {
@@ -155,6 +170,14 @@ test("records project-local browser guidance scope and uses it for prompt inject
 	assert.equal(state.trustedBrowserExecutablePath, "/tmp/project-browser");
 	assert.equal(state.trustedBrowserExecutablePathScope, "project");
 	assert.deepEqual(state.warnings, []);
+
+	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: undefined }, async () => {
+		const harness = createExtensionHarness({ cwd: fixture.cwd });
+		const instructions = await getBrowserInstructions(harness);
+		assert.match(instructions, /Project agent_browser config guidance:/);
+		assert.match(instructions, /agent_browser config sets browser\.executablePath to "\/tmp\/project-browser"/);
+		assert.match(instructions, /agent_browser config sets browser\.defaultProfile\.name to "Project Profile"/);
+	});
 });
 
 test("project browser guidance shadows global values when project config is included", async () => {

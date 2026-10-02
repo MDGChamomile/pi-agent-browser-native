@@ -349,12 +349,12 @@ test("buildToolPresentation suppresses browser profile recovery self loops", asy
 	assert.deepEqual(doctorFailure.nextActions?.map((action) => action.id), ["inspect-browser-profiles"]);
 });
 
-test("buildToolPresentation ignores unrelated profile text outside launch setup context", async () => {
+test("buildToolPresentation ignores profile-config text outside launch setup context", async () => {
 	const presentation = await buildToolPresentation({
 		args: ["get", "text", "#profile-card"],
 		commandInfo: { command: "get", subcommand: "text" },
 		cwd: process.cwd(),
-		errorText: "Could not read profile card text from selector.",
+		errorText: "Available profiles: Default",
 	});
 	assert.doesNotMatch((presentation.content[0] as { text: string }).text, /profile\/config hint/i);
 	assert.equal(presentation.nextActions, undefined);

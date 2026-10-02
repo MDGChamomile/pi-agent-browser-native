@@ -124,12 +124,16 @@ test("different sessions and native socket roots execute concurrently across pro
 	const f = await fixture(t);
 	const a = worker(t, f.options);
 	await a.event("acquired");
+	assert.equal((await f.claims()).length, 1, "A must hold its claim after acquiring");
 	const b = worker(t, { ...f.options, sessionName: "two" });
 	await b.event("acquired"); // Must enter while A still owns its claim.
+	assert.equal((await f.claims()).length, 2, "B must publish its own claim while A still owns its claim");
 	if (process.platform !== "win32") {
 		const second = await fixture(t);
-		const c = worker(t, { ...f.options, socketDir: second.root });
+		const c = worker(t, second.options);
 		await c.event("acquired");
+		assert.equal((await second.claims()).length, 1, "C must hold its claim on the second socket root");
+		assert.equal((await f.claims()).length, 2, "A and B claims must survive C acquiring on another socket root");
 		c.send("release");
 		await c.done();
 	}

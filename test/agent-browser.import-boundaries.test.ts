@@ -3,7 +3,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { resolve, relative, dirname } from "node:path";
 import test from "node:test";
 
-const IMPORT_SPECIFIER_PATTERN = /import(?:[^"']|\n)*?["'](\.{1,2}\/[^"']+)["']/g;
+// Runtime module edges only: `import`/`export` ... from statements and bare side-effect imports.
+// `type`-only edges are erased at compile time and cannot create runtime cycles, so they are skipped.
+const IMPORT_SPECIFIER_PATTERN = /\b(?:import|export)\s*(type\s+)?[^;'"()]*?["'](\.{1,2}\/[^"']+)["']/g;
 
 async function collectTypeScriptFiles(root: string): Promise<string[]> {
 	const entries = await readdir(root, { withFileTypes: true });
@@ -35,7 +37,8 @@ async function buildImportGraph(root: string): Promise<Map<string, Set<string>>>
 		const text = await readFile(file, "utf8");
 		const imports = new Set<string>();
 		for (const match of text.matchAll(IMPORT_SPECIFIER_PATTERN)) {
-			const resolved = resolveLocalTypeScriptImport(file, match[1] ?? "", knownFiles);
+			if (match[1]) continue;
+			const resolved = resolveLocalTypeScriptImport(file, match[2] ?? "", knownFiles);
 			if (resolved) imports.add(resolved);
 		}
 		graph.set(file, imports);
@@ -69,7 +72,13 @@ function findCycles(graph: Map<string, Set<string>>): string[][] {
 
 test("browser-run orchestration modules stay acyclic", async () => {
 	const root = resolve("extensions/agent-browser/lib/orchestration/browser-run");
-	const cycles = findCycles(await buildImportGraph(root));
+	const graph = await buildImportGraph(root);
+	// Re-export edges in browser-run/index.ts must stay visible to the cycle detector; without them a
+	// cycle routed through a re-export would pass unnoticed.
+	const indexImports = graph.get(resolve(root, "index.ts"));
+	assert.equal(indexImports?.has(resolve(root, "managed-session-daemon-policy.ts")), true, "index.ts re-export edge to managed-session-daemon-policy.ts is not detected");
+	assert.equal(indexImports?.has(resolve(root, "session-state.ts")), true, "index.ts re-export edge to session-state.ts is not detected");
+	const cycles = findCycles(graph);
 	assert.deepEqual(
 		cycles.map((cycle) => cycle.map((file) => relative(process.cwd(), file))),
 		[],
