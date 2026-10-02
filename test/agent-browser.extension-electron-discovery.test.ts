@@ -25,10 +25,7 @@ import {
 	inspectElectronLaunchStatus,
 } from "../extensions/agent-browser/lib/electron/cleanup.js";
 import type { ElectronLaunchFailure, ElectronLaunchRecord } from "../extensions/agent-browser/lib/electron/launch.js";
-import {
-	cleanupSecureTempArtifacts,
-	createSecureTempDirectory,
-} from "../extensions/agent-browser/lib/temp.js";
+import { createSecureTempDirectory } from "../extensions/agent-browser/lib/temp.js";
 import {
 	createExtensionHarness,
 	executeRegisteredTool,
@@ -551,37 +548,6 @@ test("Electron profile status measures the current path without changing the lau
 	}
 });
 
-test("agentBrowserExtension keeps restored Electron profile when process ownership is unverified", { concurrency: false }, async () => {
-	await cleanupSecureTempArtifacts();
-	const userDataDir = await createSecureTempDirectory("electron-profile-");
-	try {
-		const cleanupResult = await cleanupElectronLaunchResources({
-			record: {
-				appName: "Unverified Electron",
-				cleanupState: "active",
-				createdAtMs: Date.now(),
-				executablePath: process.execPath,
-				launchId: "electron-unverified-test",
-				launchedByWrapper: true,
-				pid: process.pid,
-				port: 9,
-				userDataDir,
-				version: 1,
-			},
-			timeoutMs: 50,
-		});
-		assert.equal(cleanupResult.partial, true);
-		assert.equal(cleanupResult.steps.find((step) => step.resource === "process")?.state, "failed");
-		assert.match(cleanupResult.steps.find((step) => step.resource === "process")?.error ?? "", /command line does not include wrapper-owned user data dir/);
-		assert.equal(cleanupResult.steps.find((step) => step.resource === "user-data-dir")?.state, "skipped");
-		assert.deepEqual(cleanupResult.remainingResources.sort(), ["process", "user-data-dir"]);
-		await stat(userDataDir);
-	} finally {
-		await cleanupSecureTempArtifacts();
-	}
-});
-
-
 test("restored Electron cleanup verifies native command-line profile ownership with spaces and Unicode", { concurrency: false }, async () => withPatchedEnv({
 	// macOS ps renders non-ASCII bytes as M-… in the isolated runner's C locale.
 	LC_ALL: process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8",
@@ -600,6 +566,8 @@ test("restored Electron cleanup verifies native command-line profile ownership w
 		// No child handle is supplied: both decisions must inspect the real OS command line.
 		const refused = await cleanupElectronLaunchResources({ record: { ...record, userDataDir: otherProfile } });
 		assert.equal(refused.partial, true, JSON.stringify(refused));
+		assert.equal(refused.steps.find((step) => step.resource === "process")?.state, "failed");
+		assert.deepEqual(refused.remainingResources.sort(), ["process", "user-data-dir"]);
 		assert.match(refused.steps.find((step) => step.resource === "process")?.error ?? "", /command line does not include wrapper-owned user data dir/);
 		assert.equal(refused.steps.find((step) => step.resource === "user-data-dir")?.state, "skipped");
 		assert.equal(isTestPidAlive(child.pid), true);

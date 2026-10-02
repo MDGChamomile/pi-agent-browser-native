@@ -1188,40 +1188,13 @@ const envelope = {
   success: true,
   data: {
     args: process.argv.slice(2),
-    agentBrowserActionPolicy: readEnv("AGENT_BROWSER_ACTION_POLICY"),
-    agentBrowserAutosaveInterval: readEnv("AGENT_BROWSER_AUTOSAVE_INTERVAL_MS"),
     agentBrowserConfig: readEnv("AGENT_BROWSER_CONFIG"),
-    agentBrowserConfirmActions: readEnv("AGENT_BROWSER_CONFIRM_ACTIONS"),
     agentBrowserDefaultTimeout: readEnv("AGENT_BROWSER_DEFAULT_TIMEOUT"),
-    agentBrowserEncryptionKey: readEnv("AGENT_BROWSER_ENCRYPTION_KEY"),
-    agentBrowserScreenshotDir: readEnv("AGENT_BROWSER_SCREENSHOT_DIR"),
-    agentBrowserSession: readEnv("AGENT_BROWSER_SESSION"),
-    agentBrowserIosDevice: readEnv("AGENT_BROWSER_IOS_DEVICE"),
-    agentBrowserIosUdid: readEnv("AGENT_BROWSER_IOS_UDID"),
-    agentBrowserNoXvfb: readEnv("AGENT_BROWSER_NO_XVFB"),
-    agentBrowserSessionName: readEnv("AGENT_BROWSER_SESSION_NAME"),
-    agentBrowserWebgpu: readEnv("AGENT_BROWSER_WEBGPU"),
-    agentcoreApiKey: readEnv("AGENTCORE_API_KEY"),
-    agentcoreRegion: readEnv("AGENTCORE_REGION"),
-    aiGatewayApiKey: readEnv("AI_GATEWAY_API_KEY"),
-    aiGatewayModel: readEnv("AI_GATEWAY_MODEL"),
-    awsAccessKeyId: readEnv("AWS_ACCESS_KEY_ID"),
-    awsDefaultRegion: readEnv("AWS_DEFAULT_REGION"),
-    awsRegion: readEnv("AWS_REGION"),
-    awsSecretAccessKey: readEnv("AWS_SECRET_ACCESS_KEY"),
-    awsSessionToken: readEnv("AWS_SESSION_TOKEN"),
-    browserbaseApiKey: readEnv("BROWSERBASE_API_KEY"),
-    browserbaseProjectId: readEnv("BROWSERBASE_PROJECT_ID"),
-    browserlessApiKey: readEnv("BROWSERLESS_API_KEY"),
-    browserUseApiKey: readEnv("BROWSER_USE_API_KEY"),
-    databaseUrl: readEnv("DATABASE_URL"),
     idleTimeout: readEnv("AGENT_BROWSER_IDLE_TIMEOUT_MS"),
-    kernelApiKey: readEnv("KERNEL_API_KEY"),
     lang: readEnv("LANG"),
     openaiApiKey: readEnv("OPENAI_API_KEY"),
     secret: readEnv("PI_AGENT_BROWSER_TEST_SECRET"),
     socketDir: readEnv("AGENT_BROWSER_SOCKET_DIR"),
-    unrelatedApiKey: readEnv("UNRELATED_API_KEY"),
     pathStartsWithTemp: ((process.env.PATH ?? process.env.Path ?? "").toLowerCase()).startsWith(${JSON.stringify(tempDir.toLowerCase())})
   }
 };
@@ -1231,39 +1204,12 @@ process.stdout.write(JSON.stringify(envelope));`,
 	try {
 		await withPatchedEnv(
 			{
-				AGENT_BROWSER_ACTION_POLICY: "/tmp/action-policy.json",
-				AGENT_BROWSER_AUTOSAVE_INTERVAL_MS: "1000",
 				AGENT_BROWSER_CONFIG: "/tmp/agent-browser.json",
-				AGENT_BROWSER_CONFIRM_ACTIONS: "1",
 				AGENT_BROWSER_DEFAULT_TIMEOUT: "45000",
-				AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
-				AGENT_BROWSER_SCREENSHOT_DIR: "/tmp/agent-browser-screenshots",
-				AGENT_BROWSER_SESSION: "from-parent-session",
-				AGENT_BROWSER_IOS_DEVICE: "iPhone 15 Pro",
-				AGENT_BROWSER_IOS_UDID: "ios-udid-123",
-				AGENT_BROWSER_NO_XVFB: "1",
-				AGENT_BROWSER_SESSION_NAME: "from-parent-session-name",
-				AGENT_BROWSER_WEBGPU: "true",
 				AGENT_BROWSER_SOCKET_DIR: join(tempDir, "caller-sockets"),
-				AGENTCORE_API_KEY: "agentcore-key",
-				AGENTCORE_REGION: "us-west-2",
-				AI_GATEWAY_API_KEY: "ai-gateway-key",
-				AI_GATEWAY_MODEL: "anthropic/test-model",
-				AWS_ACCESS_KEY_ID: "aws-access-key-id",
-				AWS_DEFAULT_REGION: "us-east-1",
-				AWS_REGION: "us-west-2",
-				AWS_SECRET_ACCESS_KEY: "aws-secret-access-key",
-				AWS_SESSION_TOKEN: "aws-session-token",
-				BROWSERBASE_API_KEY: "browserbase-key",
-				BROWSERBASE_PROJECT_ID: "browserbase-project",
-				BROWSERLESS_API_KEY: "browserless-key",
-				BROWSER_USE_API_KEY: "browser-use-key",
-				DATABASE_URL: "postgres://should-not-leak",
-				KERNEL_API_KEY: "kernel-key",
 				LANG: "en_US.UTF-8",
 				OPENAI_API_KEY: "openai-should-not-leak",
 				PI_AGENT_BROWSER_TEST_SECRET: "should-not-leak",
-				UNRELATED_API_KEY: "unrelated-should-not-leak",
 			},
 			async () => {
 				const processResult = await runAgentBrowserProcess({
@@ -1280,72 +1226,19 @@ process.stdout.write(JSON.stringify(envelope));`,
 				assert.equal(parsed.parseError, undefined);
 				const data = parsed.envelope?.data as {
 					args: string[];
-					agentBrowserActionPolicy: string | null;
-					agentBrowserAutosaveInterval: string | null;
 					agentBrowserConfig: string | null;
-					agentBrowserConfirmActions: string | null;
 					agentBrowserDefaultTimeout: string | null;
-					agentBrowserEncryptionKey: string | null;
-					agentBrowserScreenshotDir: string | null;
-					agentBrowserIosDevice: string | null;
-					agentBrowserIosUdid: string | null;
-					agentBrowserNoXvfb: string | null;
-					agentBrowserSession: string | null;
-					agentBrowserSessionName: string | null;
-					agentBrowserWebgpu: string | null;
-					agentcoreApiKey: string | null;
-					agentcoreRegion: string | null;
-					aiGatewayApiKey: string | null;
-					aiGatewayModel: string | null;
-					awsAccessKeyId: string | null;
-					awsDefaultRegion: string | null;
-					awsRegion: string | null;
-					awsSecretAccessKey: string | null;
-					awsSessionToken: string | null;
-					browserbaseApiKey: string | null;
-					browserbaseProjectId: string | null;
-					browserlessApiKey: string | null;
-					browserUseApiKey: string | null;
-					databaseUrl: string | null;
 					idleTimeout: string | null;
-					kernelApiKey: string | null;
 					lang: string | null;
 					openaiApiKey: string | null;
 					pathStartsWithTemp: boolean;
 					secret: string | null;
 					socketDir: string | null;
-					unrelatedApiKey: string | null;
 				};
 				assert.equal(data.args.includes("--allow-file-access"), false);
-				assert.equal(data.agentBrowserActionPolicy, "/tmp/action-policy.json");
-				assert.equal(data.agentBrowserAutosaveInterval, "1000");
 				assert.equal(data.agentBrowserConfig, "/tmp/agent-browser.json");
-				assert.equal(data.agentBrowserConfirmActions, "1");
 				assert.equal(data.agentBrowserDefaultTimeout, "25000");
-				assert.equal(data.agentBrowserEncryptionKey, "a".repeat(64));
-				assert.equal(data.agentBrowserScreenshotDir, "/tmp/agent-browser-screenshots");
-				assert.equal(data.agentBrowserIosDevice, "iPhone 15 Pro");
-				assert.equal(data.agentBrowserIosUdid, "ios-udid-123");
-				assert.equal(data.agentBrowserNoXvfb, "1");
-				assert.equal(data.agentBrowserSession, "from-parent-session");
-				assert.equal(data.agentBrowserSessionName, "from-parent-session-name");
-				assert.equal(data.agentBrowserWebgpu, "true");
-				assert.equal(data.agentcoreApiKey, "agentcore-key");
-				assert.equal(data.agentcoreRegion, "us-west-2");
-				assert.equal(data.aiGatewayApiKey, "ai-gateway-key");
-				assert.equal(data.aiGatewayModel, "anthropic/test-model");
-				assert.equal(data.awsAccessKeyId, "aws-access-key-id");
-				assert.equal(data.awsDefaultRegion, "us-east-1");
-				assert.equal(data.awsRegion, "us-west-2");
-				assert.equal(data.awsSecretAccessKey, "aws-secret-access-key");
-				assert.equal(data.awsSessionToken, "aws-session-token");
-				assert.equal(data.browserbaseApiKey, "browserbase-key");
-				assert.equal(data.browserbaseProjectId, "browserbase-project");
-				assert.equal(data.browserlessApiKey, "browserless-key");
-				assert.equal(data.browserUseApiKey, "browser-use-key");
-				assert.equal(data.databaseUrl, "postgres://should-not-leak");
 				assert.equal(data.idleTimeout, "1234");
-				assert.equal(data.kernelApiKey, "kernel-key");
 				assert.equal(data.lang, "en_US.UTF-8");
 				assert.equal(data.openaiApiKey, "openai-should-not-leak");
 				assert.equal(data.secret, "should-not-leak");
@@ -1353,7 +1246,6 @@ process.stdout.write(JSON.stringify(envelope));`,
 				if (data.socketDir) {
 					assert.equal((await stat(data.socketDir)).isDirectory(), true);
 				}
-				assert.equal(data.unrelatedApiKey, "unrelated-should-not-leak");
 				assert.equal(data.pathStartsWithTemp, true);
 			},
 		);

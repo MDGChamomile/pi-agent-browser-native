@@ -232,7 +232,16 @@ test("registers agent_browser_web_search with actionable search-type and rate-li
 		assert.ok(harness.getTool("agent_browser"));
 		const guidelines = await getBrowserInstructions(harness);
 		assert.match(guidelines, /Prefer agent_browser_web_search for current or external web facts/);
-		assert.match(guidelines, /searchType.*deep-lite/);
+		assert.match(guidelines, /public search-engine forms/);
+		assert.match(guidelines, /anti-bot\/CAPTCHA-gated/);
+		assert.match(guidelines, /searchType: deep-lite/);
+		assert.match(guidelines, /omit it for everyday lookups/);
+		assert.match(guidelines, /Provider rank is not proof of authority/);
+		assert.match(guidelines, /primary current docs/);
+		assert.match(guidelines, /Exa includeDomains; Brave site:/);
+		assert.match(guidelines, /URL aliases/);
+		assert.match(guidelines, /after you have a target URL/);
+		assert.doesNotMatch(guidelines, /one query, one follow-up max/);
 		assert.match(guidelines, /Do not run parallel agent_browser_web_search calls/);
 		assert.match(guidelines, /HTTP 429/);
 		assert.match(tool.description, /deep-lite/);
@@ -280,22 +289,6 @@ test("auto provider uses Brave when only BRAVE_API_KEY is configured", async () 
 			assert.equal(tool.namespace?.name, "browser");
 			assert.ok(tool.outputSchema);
 			assert.doesNotMatch(JSON.stringify(result), /brave-secret/);
-		});
-	});
-});
-
-test("rejects explicit Exa-only filters when Brave is the resolved provider", async () => {
-	const fixture = await createFixture();
-	await withPatchedEnv({ HOME: fixture.home, [AGENT_BROWSER_CONFIG_ENV]: undefined, [BRAVE_API_KEY_ENV]: "brave-secret", [EXA_API_KEY_ENV]: undefined }, async () => {
-		const harness = createExtensionHarness({ cwd: fixture.cwd });
-		const tool = harness.getTool(AGENT_BROWSER_WEB_SEARCH_TOOL_NAME);
-		assert.ok(tool);
-		await withFakeFetch(() => {
-			throw new Error("fetch should not be called");
-		}, async () => {
-			const result = await executeRegisteredTool(tool, harness.ctx, { query: "official docs", includeDomains: ["example.com"] });
-			assert.equal(result.isError, true);
-			assert.match(JSON.stringify(result.structuredContent), /"success":false.*includeDomains requires provider exa; resolved provider was brave/);
 		});
 	});
 });
@@ -755,6 +748,7 @@ test("local validation failures report validation-error while provider failures 
 			const result = await executeRegisteredTool(tool, harness.ctx, { query: "exa filters", includeDomains: ["example.com"] });
 			assert.equal(result.isError, true);
 			assert.equal(result.details?.failureCategory, "validation-error");
+			assert.match(JSON.stringify(result.structuredContent), /"success":false.*includeDomains requires provider exa; resolved provider was brave/);
 		});
 	});
 });

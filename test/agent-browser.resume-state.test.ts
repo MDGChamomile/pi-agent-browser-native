@@ -531,12 +531,17 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			assert.equal(close.isError, false, JSON.stringify(close));
 			assert.equal((close.details?.managedSessionOutcome as { status?: string } | undefined)?.status, "closed");
 			assert.match(close.content[0]?.text ?? "", /Managed session outcome: The current wrapper-managed browser session was closed\./);
+			const rotatedSessionName = (close.details?.managedSessionOutcome as { currentSessionName?: string } | undefined)?.currentSessionName;
+			assertIsString(rotatedSessionName);
+			assert.notEqual(rotatedSessionName, firstSessionName);
+			assert.match(rotatedSessionName, new RegExp(`^${firstSessionName.replace(/-fresh-[a-f0-9]{10}$/, "")}-fresh-[a-f0-9]{10}$`));
 
 			const followUp = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["get", "url"] });
 			assert.equal(followUp.isError, false, JSON.stringify(followUp));
 			const firstFreshSessionName = followUp.details?.sessionName;
 			assertIsString(firstFreshSessionName);
 			assert.match(firstFreshSessionName, new RegExp(`^${firstSessionName.replace(/-fresh-[a-f0-9]{10}$/, "")}-fresh-[a-f0-9]{10}$`));
+			assert.equal(rotatedSessionName, firstFreshSessionName, "the close outcome must name the reserved rotated session the follow-up call reuses");
 
 			const closeFresh = await executeRegisteredTool(harness.tool, harness.ctx, { args: ["--session", firstFreshSessionName, "close"] });
 			assert.equal(closeFresh.isError, false, JSON.stringify(closeFresh));

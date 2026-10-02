@@ -59,9 +59,6 @@ test("tab pinning leaves explicit recovery available but still guards content af
 	for (const commandTokens of [["get", "url"], ["skills", "list"], ["auth", "save", "fixture", "--url", "https://example.test/", "--username", "fixture", "--password-stdin"], ["connect", "9222"], ["state", "load", "state.json"]]) {
 		assert.equal(shouldPinSessionTabForCommand({ command: commandTokens[0], commandTokens, pinningRequired: true, sessionName: "named" }), false);
 	}
-});
-
-test("history and page actions still require the intended tab", () => {
 	for (const commandTokens of [["back"], ["forward"], ["reload"], ["click", "#field"], ["frame", "#child"]]) {
 		assert.equal(shouldPinSessionTabForCommand({ command: commandTokens[0], commandTokens, pinningRequired: true, sessionName: "named" }), true);
 	}

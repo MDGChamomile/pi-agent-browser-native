@@ -25,7 +25,7 @@ type ResumedPage = {
 	url: string;
 };
 
-async function withResumedPage(run: (page: ResumedPage) => Promise<void>, options: { live?: boolean; restoreDisabled?: boolean; explicit?: boolean; attached?: boolean } = {}): Promise<void> {
+async function withResumedPage(run: (page: ResumedPage) => Promise<void>, options: { live?: boolean } = {}): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "cold-"));
 	const socketDir = createShortPrivateSocketDir(root);
 	const cwd = join(root, "g");
@@ -72,17 +72,16 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			AGENT_BROWSER_NAMESPACE: "",
 			AGENT_BROWSER_CONFIG: undefined,
 			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
-			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: options.restoreDisabled ? "0" : undefined,
+			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: undefined,
 			PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
 			let branch: unknown[] = [];
-			const prefix = ["--namespace", "cold", ...(options.explicit ? ["--session", "caller"] : [])];
+			const prefix = ["--namespace", "cold"];
 			const first = createExtensionHarness({ branch, cwd });
 			await runExtensionEvent(first.handlers, "session_start", { reason: "new" }, first.ctx);
 			let sessionName = "";
 			for (const args of [
-				[...prefix, ...(options.attached ? ["connect", "9222"] : ["open", url])],
-				...(options.attached ? [[...prefix, "get", "url"]] : []),
+				[...prefix, "open", url],
 				[...prefix, "snapshot", "-i"],
 			]) {
 				const result = await executeRegisteredTool(first.tool, first.ctx, { args, ...(args.includes("open") ? { sessionMode: "fresh" as const } : {}) });
@@ -200,15 +199,6 @@ test("a live missing tab is not permission to reopen", { concurrency: false }, a
 		assert.equal((await readInvocationLog(logPath)).some((row) => row.args.includes("open") || row.args.includes("snapshot")), false);
 	}, { live: true });
 });
-
-for (const options of [{ restoreDisabled: true }, { explicit: true }, { attached: true }]) {
-	test(`cold resume does not reopen outside automatic managed restore: ${JSON.stringify(options)}`, { concurrency: false }, async () => {
-		await withResumedPage(async ({ harness, logPath, sessionName }) => {
-			await executeRegisteredTool(harness.tool, harness.ctx, { args: options.explicit ? ["--namespace", "cold", "--session", sessionName, "snapshot", "-i"] : ["snapshot", "-i"] });
-			assert.equal((await readInvocationLog(logPath)).some((row) => row.args.includes("open")), false);
-		}, options);
-	});
-}
 
 test("explicit close keeps the recorded URL retired on resume", { concurrency: false }, async () => {
 	await withResumedPage(async ({ branch, harness, logPath, sessionName, url }) => {

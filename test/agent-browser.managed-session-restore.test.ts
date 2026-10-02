@@ -84,17 +84,13 @@ test("managed restore sticky state is isolated per extension instance", () => {
 	assert.equal(first.isDisabled("piab-session", "team"), false);
 });
 
-	test("replace tolerates an absent branch restore identity list (undefined from a pre-upgrade runtime)", () => {
-		const state = new ManagedSessionRestoreState();
-		state.disable("piab-stale", "team");
-		// The version-skew path (new index.js restoring against an old cached runtime.js)
-		// yields `undefined` for managedSessionRestoreDisabledIdentities. Must not throw.
-		state.replace(undefined, { preserveDaemonRestoreKeys: true });
-		assert.equal(state.isDisabled("piab-stale", "team"), false);
-		assert.equal(state.hasDaemonRestoreKey("piab-stale", "team"), false);
-	});
-
 test("branch restore can preserve current-process daemon provenance without persisting it across reload", () => {
+	const staleState = new ManagedSessionRestoreState();
+	staleState.disable("piab-stale", "team");
+	// A new index restoring against an old cached runtime can receive an absent identity list.
+	staleState.replace(undefined, { preserveDaemonRestoreKeys: true });
+	assert.equal(staleState.isDisabled("piab-stale", "team"), false);
+	assert.equal(staleState.hasDaemonRestoreKey("piab-stale", "team"), false);
 	const state = new ManagedSessionRestoreState();
 	state.recordDaemonRestoreKey("piab-current", "team", null);
 	state.recordDaemonRestoreKey("piab-off-branch", undefined, "caller-key");

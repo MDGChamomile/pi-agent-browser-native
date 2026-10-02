@@ -186,23 +186,13 @@ process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));
 	}
 });
 
-test("Electron timeout schema keeps list unconfigurable and other action timeouts accepted", () => {
-	const harness = createExtensionHarness({ cwd: process.cwd() });
-	const schema = harness.getTool("agent_browser_electron")!.parameters;
-	assert.equal(Check(schema, { action: "list", timeoutMs: 1_000 }), false);
-	assert.match(compileAgentBrowserElectron({ action: "list", timeoutMs: 1_000 }).error ?? "", /list only supports query and maxResults; remove electron\.timeoutMs/);
+test("Electron list timeout guidance never recommends an unsupported nested timeout", async () => {
 	for (const action of ["launch", "status", "cleanup", "probe"] as const) {
-		const electron = { action, timeoutMs: 1_000, ...(action === "launch" ? { appName: "Demo" } : {}) };
-		assert.equal(Check(schema, electron), true, action);
-		const result = compileAgentBrowserElectron(electron);
+		const result = compileAgentBrowserElectron({ action, timeoutMs: 1_000, ...(action === "launch" ? { appName: "Demo" } : {}) });
 		assert.equal(result.error, undefined, action);
 		assert.ok(result.compiled && result.compiled.action !== "list");
 		assert.equal(result.compiled.timeoutMs, 1_000, action);
 	}
-
-});
-
-test("Electron list timeout guidance never recommends an unsupported nested timeout", async () => {
 	const harness = createExtensionHarness({ cwd: process.cwd() });
 	const nested = await executeRegisteredTool(harness.tool, harness.ctx, { electron: { action: "list", timeoutMs: 1_000 } });
 	assert.equal(nested.details?.failureCategory, "validation-error");

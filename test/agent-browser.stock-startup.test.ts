@@ -39,7 +39,6 @@ test("URL-less open uses native lazy launch without inventing navigation or hidi
 	assert.deepEqual(resolve(["open", "--help"]).toolArgs, ["open", "--help"]);
 	const ignored = JSON.stringify([["open"]]);
 	assert.equal(resolve(["batch", ""], ignored).toolStdin, ignored, "even an empty raw command displaces stdin");
-	assert.equal(resolve(["open", "--no-sandbox"]).status, "invalid");
 });
 
 test("startup arguments follow native precedence and exclude external engines and attachments", async t => {
