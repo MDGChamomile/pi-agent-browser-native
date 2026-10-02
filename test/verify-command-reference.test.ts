@@ -7,7 +7,11 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { copyFile, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { CAPABILITY_BASELINE } from "../scripts/agent-browser-capability-baseline.mjs";
@@ -16,6 +20,41 @@ import {
   stripGeneratedCapabilityBaselineBlocks,
   verifyCommandReference,
 } from "../scripts/verify-command-reference.mjs";
+
+test("maintainer CLIs reject invalid options through encoded and symlink entrypoints", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "piab-cli-"));
+  try {
+    for (const name of ["agent-browser-capability-baseline.mjs", "agent-browser-target.mjs", "startup-measurement.mjs"]) {
+      await copyFile(join("scripts", name), join(directory, name));
+    }
+    for (const [name, exitCode, diagnostic] of [
+      ["verify-command-reference.mjs", 2, /Unknown option/],
+      ["check-command-reference-baseline.mjs", 1, /Invalid arguments/],
+      ["profile-startup.mjs", 2, /Unknown option/],
+    ] as const) {
+      const script = join(directory, name);
+      const encodedScript = join(directory, `encoded % ${name}`);
+      const alias = join(directory, `alias-${name}`);
+      await copyFile(join("scripts", name), script);
+      await copyFile(script, encodedScript);
+      await symlink(script, alias);
+      for (const [kind, entrypoint] of [["encoded path", encodedScript], ["symlink", alias]] as const) {
+        await t.test(`${name}: ${kind}`, () => {
+          const result = spawnSync(process.execPath, [entrypoint, "--invalid-option"], {
+            encoding: "utf8",
+            timeout: 10_000,
+          });
+          assert.ifError(result.error);
+          assert.equal(result.status, exitCode, `stdout=${JSON.stringify(result.stdout)} stderr=${JSON.stringify(result.stderr)}`);
+          assert.equal(result.stdout, "");
+          assert.match(result.stderr, diagnostic);
+        });
+      }
+    }
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
 
 function fakeHelpFor(label: string): string {
   return CAPABILITY_BASELINE.upstreamExpectations

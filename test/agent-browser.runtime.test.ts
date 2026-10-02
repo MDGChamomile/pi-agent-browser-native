@@ -2083,6 +2083,24 @@ test("redactInvocationArgs masks sensitive flags and auth-bearing urls", () => {
 		"--url",
 		"https://example.com",
 	]);
+	for (const args of [
+		["cookies", "set", "--curl", "/tmp/cookies.txt"],
+		["--json", "--session", "demo", "cookies", "set", "--curl", "/tmp/cookie file.txt"],
+		["cookies", "set", "--domain", "example.test", "--curl", "/tmp/cookies.txt"],
+		["cookies", "set", "unused", "ignored", "--curl", "/tmp/cookies.txt"],
+		["batch", "cookies set --curl '/tmp/cookie file.txt'"],
+	]) {
+		assert.deepEqual(redactInvocationArgs(args), args);
+	}
+	assert.deepEqual(redactInvocationArgs(["--session", "--curl", "cookies", "set", "sid", "cookie-secret"]), [
+		"--session", "--curl", "cookies", "set", "sid", "[REDACTED]",
+	]);
+	assert.deepEqual(redactInvocationArgs(["cookies", "set", "--curl", "/tmp/cookies.txt", "--headers", '{"Authorization":"Bearer cookie-secret"}']), [
+		"cookies", "set", "--curl", "/tmp/cookies.txt", "--headers", "[REDACTED]",
+	]);
+	assert.deepEqual(redactInvocationArgs(["batch", "cookies set sid cookie-secret"]), [
+		"batch", "'cookies' 'set' 'sid' '[REDACTED]'",
+	]);
 	assert.deepEqual(redactInvocationArgs(["storage", "local", "set", "authToken", "storage-secret"]), [
 		"storage",
 		"local",

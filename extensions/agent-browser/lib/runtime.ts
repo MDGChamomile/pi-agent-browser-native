@@ -444,7 +444,9 @@ export function redactInvocationArgs(args: string[]): string[] {
 		}
 	}
 
-	if (commandStartIndex !== undefined && args[commandStartIndex] === "cookies" && args[commandStartIndex + 1] === "set" && redacted[commandStartIndex + 3] !== undefined) {
+	if (commandStartIndex !== undefined && args[commandStartIndex] === "cookies" && args[commandStartIndex + 1] === "set"
+		&& !extractUpstreamCommandTokens(args).slice(2).includes("--curl")
+		&& redacted[commandStartIndex + 3] !== undefined) {
 		redacted[commandStartIndex + 3] = "[REDACTED]";
 	}
 

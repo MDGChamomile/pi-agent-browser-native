@@ -759,6 +759,8 @@ These calls return plain text and stay stateless: the extension does not inject 
 | `cookies [get|set|clear]` | Manage cookies. Full set form: `cookies set <name> <value> --url <url> --domain <domain> --path <path> --httpOnly --secure --sameSite <Strict|Lax|None> --expires <timestamp>`; also supports `cookies set --curl <file>` for JSON, cURL, or bare Cookie-header bulk imports. |
 | `storage <local|session>` | Manage web storage. |
 
+`cookies set --curl <file>` selects native file-import mode even when `--curl` follows other set operands. Ordinary import paths remain visible in invocation echoes and failed batch diagnostics; inline cookie values, sensitive flags, and secret-bearing path text still redact. File contents are not echoed by this exception.
+
 Privacy note: `cookies get` can expose real profile cookies. Do not run it against `--profile Default` or other authenticated profiles unless the user explicitly needs cookie inspection; prefer task-specific page actions and storage checks.
 
 ### WebMCP page tools

@@ -14,11 +14,11 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { DIRECT_IMPORT_BUDGET_MS, measureColdStartup } from "./startup-measurement.mjs";
+
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_SAMPLES = 10;
-const CHILD_TIMEOUT_MS = 10_000;
-const DIRECT_IMPORT_BUDGET_MS = 250;
 const BUILD_SCRIPT = "./scripts/build.mjs";
 
 class UsageError extends Error {
@@ -95,40 +95,10 @@ async function readPackageEntrypoint() {
 	return extensionPath;
 }
 
-async function measureDirectImportSample(entrypoint, sampleIndex) {
-	const script = `
-const start = performance.now();
-const extension = await import(${JSON.stringify(entrypoint)});
-const imported = performance.now();
-const registeredEvents = [];
-const pi = {
-  events: { on(...args) { registeredEvents.push(args); } },
-  tools: [],
-  on(...args) { registeredEvents.push(args); },
-  registerTool(tool) { this.tools.push(tool.name); }
-};
-extension.default(pi);
-const registered = performance.now();
-console.log(JSON.stringify({
-  events: registeredEvents.length,
-  importMs: imported - start,
-  sampleIndex: ${sampleIndex},
-  tools: pi.tools,
-  totalMs: registered - start
-}));
-`;
-	const result = await execFile(process.execPath, ["--input-type=module", "-e", script], {
-		cwd: repoRoot,
-		maxBuffer: 1024 * 1024,
-		timeout: CHILD_TIMEOUT_MS,
-	});
-	return { ...JSON.parse(result.stdout.trim()), ok: true };
-}
-
 async function measureDirectImportSamples(entrypoint, sampleCount) {
 	const samples = [];
 	for (let index = 0; index < sampleCount; index += 1) {
-		samples.push(await measureDirectImportSample(entrypoint, index + 1));
+		samples.push({ ...await measureColdStartup(entrypoint, repoRoot), sampleIndex: index + 1, ok: true });
 	}
 	return samples;
 }
@@ -204,7 +174,7 @@ async function main(argv = process.argv.slice(2)) {
 	return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
 	main().then(
 		(code) => {
 			process.exitCode = code;

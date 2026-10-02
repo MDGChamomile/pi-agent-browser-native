@@ -107,7 +107,7 @@ function getStatefulCommandSensitiveValues(command: string[] | undefined): strin
 	if (!command) return [];
 	const tokens = extractUpstreamCommandTokens(command);
 	const values: string[] = [];
-	if (tokens[0] === "cookies" && tokens[1] === "set" && tokens[3]) values.push(tokens[3]);
+	if (tokens[0] === "cookies" && tokens[1] === "set" && !tokens.slice(2).includes("--curl") && tokens[3]) values.push(tokens[3]);
 	if (tokens[0] === "storage" && ["local", "session"].includes(tokens[1] ?? "") && tokens[2] === "set" && tokens[4]) values.push(tokens[4]);
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];

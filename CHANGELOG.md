@@ -8,12 +8,15 @@
 
 ### Changed
 
+- Share the unchanged 300000ms code timeout ceiling between its schema and runner, and the unchanged startup measurement/250ms budget between the regression test and safe profiler (retaining the Android test's 1000ms exception). Remove the unreachable platform-smoke passthrough entry without changing facade gates.
 - Move retained regressions to focused queue, artifact, input-validation, Electron host/branch, and Pi-pipeline owners. Relocate queue and concurrent artifact-merge helpers out of the extension entrypoint without changing their behavior. Consolidate required platform paths and private-file/tarball leak checks into the canonical package verifier and its existing real-tarball test. Allocate the macOS artifact alias fixture under `/tmp` so its path-alias contract does not depend on `TMPDIR`.
 - Consolidate duplicate test invocations into their owning tables and delivery boundaries, preserving distinct lifecycle, redaction, recovery, and native activation checks. Split recording dependency, reservation, and batch-lifecycle assertions into named contracts. Test-only; no production behavior changed.
 - Repaired 23 weak test assertions found by the test audit: literal prompt-byte expectations instead of source-derived constants, per-fixture bound expectations replacing pass-for-every-row alternations, real execution and credential-laziness probes for web-search/config, exact root-session `get url` probe matrices in passthrough coverage, complete guarded-set and key-set assertions, and anchored literal launcher/argv-delivery checks. Test-only; no production behavior changed.
 
 ### Fixed
 
+- Execute maintainer command-reference and startup-profile scripts correctly through symlink and space/percent-encoded paths using Node's native main-module detection.
+- Keep ordinary `cookies set --curl` import paths visible in invocation echoes and failed batch diagnostics without exposing inline cookie values, secret-bearing flags or file contents.
 - Host the permissioned `agent_browser_code` child with a real Node runtime from `PATH` when Pi runs as a Bun-compiled binary, and fail as `missing-binary` with a clear remediation when no Node runtime is available instead of hanging the worker handshake (#238).
 - Resolve npm `.cmd` shims on Windows in `pi-agent-browser-doctor` PATH checks so installed `agent-browser` and `pi` binaries stop producing false negatives (#219).
 
