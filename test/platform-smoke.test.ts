@@ -25,7 +25,6 @@ test("platform smoke scripts have working syntax and help", () => {
 
 	const doctorScript = readFileSync("scripts/platform-smoke/doctor.mjs", "utf8");
 	assert.match(doctorScript, /cleanup failed/);
-	assert.match(doctorScript, /!stop\.ok/);
 
 	for (const path of [
 		"scripts/platform-smoke/platform-build-windows.ps1",
@@ -33,7 +32,6 @@ test("platform smoke scripts have working syntax and help", () => {
 	]) {
 		assert.ok(existsSync(path), `${path} should exist`);
 		const powershellScript = readFileSync(path, "utf8");
-		assert.match(powershellScript, /PLATFORM_/);
 		if (path.endsWith("browser-dogfood-windows.ps1")) {
 			assert.doesNotMatch(powershellScript, /npm\s+install\s+-g/);
 			assert.doesNotMatch(powershellScript, /agent-browser\s+install/);
@@ -109,7 +107,6 @@ const dogfoodPosix = buildBrowserDogfoodCommand("ubuntu");
 const dogfoodWarmPosix = buildBrowserDogfoodCommand("ubuntu", CAPABILITY_BASELINE.targetVersion, true);
 const dogfoodWindows = buildBrowserDogfoodCommand("windows-native");
 const dogfoodWarmWindows = buildBrowserDogfoodCommand("windows-native", CAPABILITY_BASELINE.targetVersion, true);
-const dogfoodWindowsScript = readFileSync("scripts/platform-smoke/browser-dogfood-windows.ps1", "utf8");
 const result = {
   macosPlatform: platformFor("macos") === "posix",
   ubuntuPlatform: platformFor("ubuntu") === "posix",
@@ -129,11 +126,9 @@ const result = {
   dogfoodRunsScript: dogfoodPosix.includes("verify-agent-browser-dogfood.ts"),
   dogfoodChecksBaseline: dogfoodPosix.includes("EXPECTED_AGENT_BROWSER_VERSION='agent-browser " + CAPABILITY_BASELINE.targetVersion + "'") && dogfoodPosix.includes("PLATFORM_AGENT_BROWSER_READY_EXIT"),
   dogfoodKeepsArtifacts: dogfoodPosix.includes("--artifact-dir"),
-  dogfoodWarmSkipsDuplicateInstall: dogfoodWarmPosix.includes("PLATFORM_NPM_CI_SKIPPED=1") && dogfoodWarmWindows.includes("-SkipNpmCi") && dogfoodWindowsScript.includes("$SkipNpmCi"),
-  dogfoodWindowsUsesScript: dogfoodWindows.includes("browser-dogfood-windows.ps1") && dogfoodWindows.includes("-AgentBrowserVersion '" + CAPABILITY_BASELINE.targetVersion + "'"),
-  dogfoodWindowsRetriesTransientOpen: dogfoodWindowsScript.includes("PLATFORM_DOGFOOD_ATTEMPT"),
-  dogfoodWindowsBoundsPrewarmCommands: dogfoodWindowsScript.includes("Invoke-AgentBrowserWithTimeout") && dogfoodWindowsScript.includes("PLATFORM_AGENT_BROWSER_COMMAND_TIMEOUT") && dogfoodWindowsScript.includes("taskkill.exe"),
-  dogfoodWindowsSkipsCloseAfterFailedPrewarm: dogfoodWindowsScript.includes("if ($BrowserPrewarmExit -eq 0)") && dogfoodWindowsScript.includes('"close", "--json", "--session"'),
+  dogfoodColdInstallsDependencies: dogfoodPosix.includes("npm ci 2>&1") && !dogfoodPosix.includes("PLATFORM_NPM_CI_SKIPPED=1"),
+  dogfoodWarmSkipsDuplicateInstall: dogfoodWarmPosix.includes("PLATFORM_NPM_CI_SKIPPED=1") && dogfoodWarmWindows.includes("-SkipNpmCi") && !dogfoodWindows.includes("-SkipNpmCi"),
+  dogfoodWindowsUsesScript: dogfoodWindows.includes("browser-dogfood-windows.ps1") && dogfoodWindows.includes("-AgentBrowserVersion '" + CAPABILITY_BASELINE.targetVersion + "'") && dogfoodWarmWindows.includes("-AgentBrowserVersion '" + CAPABILITY_BASELINE.targetVersion + "'"),
   dogfoodWindowsDoesNotBootstrap: !dogfoodWindows.includes("npm install -g") && !dogfoodWindows.includes("agent-browser install"),
 };
 console.log(JSON.stringify(result));

@@ -213,16 +213,12 @@ test("writeFakeAgentBrowserBinary installs Windows cmd launcher when platform is
 			`process.stdout.write(JSON.stringify({ ok: true }));`,
 			"win32",
 		);
-		const [cmdText, scriptText] = await Promise.all([
-			readFile(join(tempDir, "agent-browser.cmd"), "utf8"),
-			readFile(join(tempDir, "agent-browser-fake.cjs"), "utf8"),
-		]);
+		const cmdText = await readFile(join(tempDir, "agent-browser.cmd"), "utf8");
 
 		assert.equal(launcherPath, join(tempDir, "agent-browser.cmd"));
 		assert.match(cmdText, /@ECHO OFF/i);
 		assert.match(cmdText, /agent-browser-fake\.cjs/);
-		assert.match(cmdText, /%*\r?\n/);
-		assert.match(scriptText, /ok: true/);
+		assert.match(cmdText, /" %\*\r\n$/);
 		await assert.rejects(stat(join(tempDir, "agent-browser")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 	} finally {
 		await rm(tempDir, { force: true, maxRetries: 5, recursive: true, retryDelay: 100 });
@@ -1092,8 +1088,13 @@ test("runAgentBrowserProcess refuses incompatible environment changes after plan
 test("runAgentBrowserProcess passes upstream state, session, file, and launch capabilities through", { concurrency: false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-state-boundary-"));
 	const basePath = process.env.PATH ?? "";
-	const startedPath = join(tempDir, "started");
-	await writeFakeAgentBrowserBinary(tempDir, `require("node:fs").writeFileSync(${JSON.stringify(startedPath)}, "started");`);
+	const observedPath = join(tempDir, "observed.jsonl");
+	await writeFakeAgentBrowserBinary(tempDir, `require("node:fs").appendFileSync(${JSON.stringify(observedPath)}, JSON.stringify({ argv: process.argv.slice(2), sessionEnv: process.env.AGENT_BROWSER_SESSION ?? null, screenshotDirEnv: process.env.AGENT_BROWSER_SCREENSHOT_DIR ?? null, stateEnv: process.env.AGENT_BROWSER_STATE ?? null }) + "\\n");`);
+	const readLastObservation = async (): Promise<{ argv: string[]; sessionEnv: string | null; screenshotDirEnv: string | null; stateEnv: string | null }> => {
+		const lines = (await readFile(observedPath, "utf8")).split("\n").filter((line) => line.length > 0);
+		assert.ok(lines.length > 0, "fake upstream never ran");
+		return JSON.parse(lines[lines.length - 1] ?? "");
+	};
 	execFileSync("git", ["init", "-q", tempDir], { stdio: "ignore" });
 	try {
 		await withPatchedEnv({ PATH: `${tempDir}${delimiter}${basePath}` }, async () => {
@@ -1103,31 +1104,42 @@ test("runAgentBrowserProcess passes upstream state, session, file, and launch ca
 				cwd: tempDir,
 			});
 			assert.equal(result.agentBrowserStarted, true);
+			assert.deepEqual(await readLastObservation(), { argv: ["state", "show", `${foreignKey}-foreign.json`], sessionEnv: null, screenshotDirEnv: null, stateEnv: null });
 			const foreignSession = await runAgentBrowserProcess({
 				args: ["--session", "piab-foreign", "snapshot", "-i"],
 				cwd: tempDir,
 			});
 			assert.equal(foreignSession.agentBrowserStarted, true);
+			assert.deepEqual(await readLastObservation(), { argv: ["--session", "piab-foreign", "snapshot", "-i"], sessionEnv: null, screenshotDirEnv: null, stateEnv: null });
+			// PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO keeps the fake's session-info shortcut from
+			// replying before the observation body runs.
 			const foreignEnvironmentSession = await runAgentBrowserProcess({
 				args: ["session", "info"],
 				cwd: tempDir,
-				env: { AGENT_BROWSER_SESSION: "piab-foreign" },
+				env: { AGENT_BROWSER_SESSION: "piab-foreign", PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1" },
 			});
 			assert.equal(foreignEnvironmentSession.agentBrowserStarted, true);
-			for (const options of [
+			assert.deepEqual(await readLastObservation(), { argv: ["session", "info"], sessionEnv: "piab-foreign", screenshotDirEnv: null, stateEnv: null });
+			const passthroughRows: Array<{ args: string[]; env?: Record<string, string> }> = [
 				{ args: ["--allow-file-access", "true", "open", "https://example.com"] },
 				{ args: ["--download-path", "-x/../.agent-browser/downloads", "open", "https://example.com"] },
 				{ args: ["screenshot", join(tempDir, ".agent-browser", "capture.png")] },
 				{ args: ["open", "https://example.com"], env: { AGENT_BROWSER_SCREENSHOT_DIR: join(tempDir, ".agent-browser", "screenshots") } },
 				{ args: ["open", "https://example.com"], env: { AGENT_BROWSER_STATE: join(tempDir, ".agent-browser", "sessions", "auth.json") } },
-			]) {
+			];
+			for (const options of passthroughRows) {
 				const forwarded = await runAgentBrowserProcess({ ...options, cwd: tempDir });
 				assert.equal(forwarded.agentBrowserStarted, true);
+				assert.deepEqual(await readLastObservation(), {
+					argv: options.args,
+					sessionEnv: null,
+					screenshotDirEnv: options.env?.AGENT_BROWSER_SCREENSHOT_DIR ?? null,
+					stateEnv: options.env?.AGENT_BROWSER_STATE ?? null,
+				});
 			}
 			const unverified = await runAgentBrowserProcess({ args: ["snapshot", "-i"], cwd: tempDir, managedStatePageUrlUnknown: true });
 			assert.equal(unverified.agentBrowserStarted, false);
 			assert.match(unverified.spawnError?.message ?? "", /active page became unverified/);
-			await stat(startedPath);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });

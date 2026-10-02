@@ -114,8 +114,12 @@ test("agentBrowserExtension keeps full browser guidance and installed doc pointe
 		assert.match(guidelineText, /ffmpeg before start/);
 		assert.match(guidelineText, /Verify nested scrolling/);
 		assert.match(guidelineText, /follow visible nextActions/);
-		assert.equal(guidelineText.includes(SHARED_BROWSER_PLAYBOOK_GUIDELINES[12]), true);
-		assert.equal(guidelineText.includes(QUICK_START_GUIDELINES[0]), true);
+		assert.match(guidelineText, /serialize each complete browser operation and code cell by native socket context, namespace, and session/);
+		assert.match(guidelineText, /Different identities remain concurrent/);
+		assert.match(guidelineText, /It is not a transaction or rollback/);
+		assert.match(guidelineText, /Choose agent_browser for one native command, native batch --bail with JSON-array stdin for a known fixed sequence/);
+		assert.match(guidelineText, /Return to the model when a fresh observation needs judgment/);
+		assert.match(guidelineText, /Neither tool is a named recipe registry/);
 		assert.equal(
 			SHARED_BROWSER_PLAYBOOK_GUIDELINES.some((line) => line.includes("evidence-only screenshots")),
 			true,

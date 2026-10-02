@@ -392,7 +392,9 @@ test("buildToolPresentation preserves managed restore capabilities and state-lis
 	const listSerialized = JSON.stringify(list);
 	assert.equal(list.summary, "States: 2");
 	assert.match((list.content[0] as { text: string }).text, /caller-owned\.json/);
-	assert.match(listSerialized, /piab-r2-|private\.example|managed\.json/);
+	assert.match(listSerialized, new RegExp(restoreKey), "state list keeps the wrapper restore key visible");
+	assert.match(listSerialized, /private\.example/, "state list keeps the restore-check URL visible");
+	assert.doesNotMatch(listSerialized, /REDACTED MANAGED STATE/);
 
 	const sessionInfo = await buildToolPresentation({
 		commandInfo: { command: "session", subcommand: "info" },

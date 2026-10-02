@@ -46,6 +46,8 @@ test("retirePendingRecordingManifestEntries retires only the closed session reco
 	assert.equal(retired.entries[0]?.retentionState, "live");
 	assert.equal(retired.entries[0]?.status, "unverified");
 	assert.equal(retired.entries[0]?.exists, undefined, "retiring a reservation does not prove a file is missing");
+	assert.equal(retired.entries[1]?.subcommand, "restart", "the other session's pending recording keeps its subcommand");
+	assert.equal(retired.entries[1]?.status, undefined, "the other session's pending recording gets no status change");
 	assert.equal(retired.liveCount, 3);
 	assert.equal(retired.updatedAtMs, 4);
 });

@@ -30,6 +30,22 @@ const stripWrapperPrefix = (args: string[]) => {
 	return stripped;
 };
 
+// The wrapper resolves the implicit root Pi session to a native named session and live-verifies the
+// active page URL with a `get url` probe before page-content access. Explicit navigation, history or
+// attachment transitions that themselves re-establish the target, tab selection/close, lifecycle
+// closes, dialogs, and `get url` itself are exempt; everything else is probed first.
+const needsRootSessionPageCheck = (args: string[]) => {
+	const command = args[0];
+	const subcommand = args[1];
+	if (command === "get") return subcommand !== "url";
+	if (["open", "goto", "navigate", "pushstate", "vitals", "web-vitals", "back", "forward", "reload", "connect", "close", "quit", "exit", "dialog"].includes(command)) return false;
+	if (command === "state") return subcommand !== "load";
+	if (command === "tab") return subcommand === "new";
+	if (command === "diff") return subcommand !== "url";
+	if (command === "record") return subcommand !== "stop";
+	return true;
+};
+
 test("agentBrowserExtension exposes native session-info facts in model-visible content", { concurrency: false }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "piab-si-"));
 	const home = join(root, "home");
@@ -809,18 +825,19 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 				const command = normalizedArgs[0];
 				const tabAction = command === "tab" && normalizedArgs[1] !== undefined && normalizedArgs[1] !== "list";
 				const probesSummary = command === "click" || tabAction || command === "back" || command === "forward" || command === "reload" || command === "dblclick" || command === "eval";
+				const pageCheck = needsRootSessionPageCheck(normalizedArgs) ? [["get", "url"]] : [];
 				if (!probesSummary) return command === "get" && normalizedArgs[1] === "url"
 					? [normalizedArgs, ["tab", "list"]]
-					: [normalizedArgs];
+					: [...pageCheck, normalizedArgs];
 				const titleProbe = !navigationSummaryTitleObserved || tabAction;
 				navigationSummaryTitleObserved = true;
 				return titleProbe
-					? [normalizedArgs, ["get", "url"], ["get", "title"], ["tab", "list"]]
-					: [normalizedArgs, ["get", "url"], ["tab", "list"]];
+					? [...pageCheck, normalizedArgs, ["get", "url"], ["get", "title"], ["tab", "list"]]
+					: [...pageCheck, normalizedArgs, ["get", "url"], ["tab", "list"]];
 			});
-			// Root-session page checks may add get url; retain exact argv/order for every other command.
-			const withoutUrlChecks = (rows: string[][]) => rows.filter((args) => args.join(" ") !== "get url");
-			assert.deepEqual(withoutUrlChecks(commandInvocations), withoutUrlChecks(expectedInvocations));
+			// Exact argv and order including the root-session `get url` page checks: a missing or
+			// spurious URL probe fails here instead of being filtered away.
+			assert.deepEqual(commandInvocations, expectedInvocations);
 			assert.ok(invocations.every((entry) => entry.args[0] === "--json" && entry.args.includes("--session")));
 		});
 	} finally {
@@ -918,17 +935,28 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 			}
 
 			const invocations = await readInvocationLog(logPath);
-			const userInvocations = invocations
-				.map((entry) => stripWrapperPrefix(entry.args))
-				.filter((args) => !(args[0] === "tab" && args[1] === "list"))
-				.filter((args) => !(args.includes("cookies") && args.includes("set") && args.includes("json-cookie-secret")));
-			assert.deepEqual(userInvocations.filter((args) => args.join(" ") !== "get url"), commands.map((args) => [...args]).filter((args) => args.join(" ") !== "get url"));
+			const isSessionlessAuthRow = (args: string[]) => args[0] === "auth" && ["save", "list", "show", "delete", "remove"].includes(args[1] ?? "");
+			const isSessionlessStateRow = (args: string[]) => args[0] === "state" && (args[1] === "list" || (args[1] === "clear" && args[2] === "caller-owned"));
+			// Exact argv and order including the root-session `get url` page checks and the explicit
+			// --json follow-up; sessionless auth/state rows and page-transition/dialog/get-url rows stay
+			// unprobed, so a missing or spurious URL probe fails here instead of being filtered away.
+			assert.deepEqual(invocations.map((entry) => stripWrapperPrefix(entry.args)), [
+				...commands.flatMap((args): string[][] => {
+					const normalizedArgs = [...args];
+					const pageCheck = !isSessionlessAuthRow(normalizedArgs) && !isSessionlessStateRow(normalizedArgs) && needsRootSessionPageCheck(normalizedArgs)
+						? [["get", "url"]]
+						: [];
+					return normalizedArgs[0] === "get" && normalizedArgs[1] === "url"
+						? [normalizedArgs, ["tab", "list"]]
+						: [...pageCheck, normalizedArgs];
+				}),
+				["get", "url"],
+				["--json", "cookies", "set", "sid", "json-cookie-secret", "--url", "https://example.test"],
+			]);
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {
 				const userArgs = stripWrapperPrefix(entry.args);
-				const isSessionlessAuth = userArgs[0] === "auth" && ["save", "list", "show", "delete", "remove"].includes(userArgs[1] ?? "");
-				const isSessionlessState = userArgs[0] === "state" && (userArgs[1] === "list" || (userArgs[1] === "clear" && userArgs[2] === "caller-owned"));
-				return isSessionlessAuth || isSessionlessState ? !entry.args.includes("--session") : entry.args.includes("--session");
+				return isSessionlessAuthRow(userArgs) || isSessionlessStateRow(userArgs) ? !entry.args.includes("--session") : entry.args.includes("--session");
 			}));
 		});
 	} finally {
@@ -1063,9 +1091,16 @@ process.stdout.write(JSON.stringify({ success: true, data }));`,
 
 			const invocations = await readInvocationLog(logPath);
 			const userInvocations = invocations.map((entry) => stripWrapperPrefix(entry.args));
-			assert.deepEqual(userInvocations.filter((args) => args.join(" ") !== "get url"), commands.flatMap((args) => args[0] === "diff" && args[1] === "url"
-				? [[...args], ["get", "title"], ["tab", "list"]]
-				: [[...args]]).filter((args) => args.join(" ") !== "get url"));
+			// Exact argv and order including the root-session `get url` page checks; diff url is a page
+			// transition that re-verifies the new target afterwards, so a missing or spurious URL probe
+			// fails here instead of being filtered away.
+			assert.deepEqual(userInvocations, commands.flatMap((args): string[][] => {
+				const normalizedArgs = stripWrapperPrefix([...args]);
+				if (normalizedArgs[0] === "diff" && normalizedArgs[1] === "url") return [normalizedArgs, ["get", "url"], ["get", "title"], ["tab", "list"]];
+				const command = normalizedArgs[0] === "--model" ? normalizedArgs[2] : normalizedArgs[0];
+				const pageCheck = command !== "dashboard" && needsRootSessionPageCheck(normalizedArgs) ? [["get", "url"]] : [];
+				return [...pageCheck, normalizedArgs];
+			}));
 			assert.ok(invocations.every((entry) => entry.args.includes("--json")));
 			assert.ok(invocations.every((entry) => {
 				const userArgs = stripWrapperPrefix(entry.args);

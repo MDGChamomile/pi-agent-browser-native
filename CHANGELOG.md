@@ -6,6 +6,10 @@
 
 - Deleted dead production code surfaced by the test audit: `getOwnedManagedSessionRestoreKey`, `parseValidBatchStepEntries`, `normalizeCommandName` (alias resolution is owned by the capability-table predicates), `AGENT_BROWSER_JOB_TYPE_DELAYED_TEXT_MAX_CHARACTERS`, `isProjectSafeCredentialValueForProvider`, `isPlaintextCredentialValue`, the unused async `loadAgentBrowserConfig` duplicate of the sync loader, the unused `ensureAgentBrowserSocketDir` wrapper, and 46 export keywords (22 files) with no cross-module consumers. No behavior changed; owning tests now assert through the exported boundaries (`loadAgentBrowserConfigSync`, `getAgentBrowserSocketDirValidationError`, `runAgentBrowserScript`, capability predicates).
 
+### Changed
+
+- Repaired 23 weak test assertions found by the test audit: literal prompt-byte expectations instead of source-derived constants, per-fixture bound expectations replacing pass-for-every-row alternations, real execution and credential-laziness probes for web-search/config, exact root-session `get url` probe matrices in passthrough coverage, complete guarded-set and key-set assertions, and anchored literal launcher/argv-delivery checks. Test-only; no production behavior changed.
+
 ### Fixed
 
 - Host the permissioned `agent_browser_code` child with a real Node runtime from `PATH` when Pi runs as a Bun-compiled binary, and fail as `missing-binary` with a clear remediation when no Node runtime is available instead of hanging the worker handshake (#238).

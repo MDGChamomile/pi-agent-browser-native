@@ -1571,8 +1571,10 @@ test("launch-scoped flag metadata is reflected in playbook and command reference
 	].join("\n");
 	const commandReference = readFileSync("docs/COMMAND_REFERENCE.md", "utf8");
 	for (const flag of LAUNCH_SCOPED_FLAGS) {
-		assert.match(playbookText, new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `playbook missing ${flag}`);
-		assert.match(commandReference, new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `command reference missing ${flag}`);
+		// Delimited token: `-p` must not be satisfied by "changed-pixel" and `--restore` by `--restore-save`.
+		const delimitedFlag = new RegExp(`(?<![\\w-])${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+		assert.match(playbookText, delimitedFlag, `playbook missing ${flag}`);
+		assert.match(commandReference, delimitedFlag, `command reference missing ${flag}`);
 	}
 });
 

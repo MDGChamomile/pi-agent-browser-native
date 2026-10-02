@@ -47,7 +47,11 @@ test("buildPromptPolicy detects requested artifact paths without deriving semant
 Save a screenshot here: /tmp/pi-smoke/page.png
 Save a short screen recording here if recording is available: /tmp/pi-smoke/run.webm`);
 
-	assert.equal("stopBoundary" in policy, false);
+	assert.deepEqual(
+		Object.keys(policy).sort(),
+		["allowLegacyAgentBrowserBash", "requestedArtifacts"],
+		"prompt policy must not grow semantic action-gate fields under any name",
+	);
 	assert.deepEqual(policy.requestedArtifacts, [
 		{ kind: "screenshot", path: "/tmp/pi-smoke/page.png", required: true },
 		{ kind: "recording", path: "/tmp/pi-smoke/run.webm", required: false },

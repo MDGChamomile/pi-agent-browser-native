@@ -22,16 +22,20 @@ const measuredReceipt = {
 };
 
 test("session info separates daemon, browser and Pi ownership and keeps absent native identity unknown", async () => {
-	for (const browser of [undefined, { status: "connected", alive: true, pid: 9876, userDataDir: "/exact/Chrome profile", ownership: "launched", tabs: [{ tabId: "t1", url: "https://app.test/", title: "Live tab", active: true }], error: null }, { status: "connected", alive: true, pid: null, userDataDir: null, ownership: "attached", tabs: [], error: null }]) {
+	for (const { browser, expected } of [
+		{ browser: undefined, expected: { chromePid: "unknown", cleanup: "caller-owned", ownership: "unknown" } },
+		{ browser: { status: "connected", alive: true, pid: 9876, userDataDir: "/exact/Chrome profile", ownership: "launched", tabs: [{ tabId: "t1", url: "https://app.test/", title: "Live tab", active: true }], error: null }, expected: { chromePid: "9876", cleanup: "wrapper-managed", ownership: "launched" } },
+		{ browser: { status: "connected", alive: true, pid: null, userDataDir: null, ownership: "attached", tabs: [], error: null }, expected: { chromePid: "unknown", cleanup: "caller-owned", ownership: "attached" } },
+	] as const) {
 		const presentation = await buildToolPresentation({
 			commandInfo: { command: "session", subcommand: "info" }, cwd: process.cwd(), piCleanupOwnership: browser?.ownership === "launched" ? "wrapper-managed" : "caller-owned",
 			envelope: { success: true, data: { active: true, pid: 1234, session: "shared", runtime: { browserLaunched: true, browser, recording: { current: null, last: measuredReceipt } } } },
 		});
 		const text = presentation.content[0]?.type === "text" ? presentation.content[0].text : "";
 		assert.match(text, /Daemon: active; PID: 1234/);
-		assert.match(text, /Chrome PID: (9876|unknown)/);
-		assert.match(text, /Pi cleanup ownership: (wrapper-managed|caller-owned)/);
-		assert.match(text, /Native browser ownership: (launched|attached|unknown)/);
+		assert.match(text, new RegExp(`Chrome PID: ${expected.chromePid}`));
+		assert.match(text, new RegExp(`Pi cleanup ownership: ${expected.cleanup}`));
+		assert.match(text, new RegExp(`Native browser ownership: ${expected.ownership}`));
 		assert.match(text, /take-1/);
 		if (!browser) assert.match(text, /Browser: unknown; alive: unknown/);
 		if (browser?.userDataDir) { assert.match(text, /Exact profile: \/exact\/Chrome profile/); assert.match(text, /Live tab/); }
