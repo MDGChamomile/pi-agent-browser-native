@@ -567,6 +567,11 @@ test("buildToolPresentation redacts failed stateful batch details", async () => 
 					error: { message: "failed cookie-secret", value: "cookie-secret" },
 					success: false,
 				},
+				{
+					command: ["cookies", "set", "--curl", "/tmp/cookies.txt"],
+					error: { message: "cookies --curl: cannot read '/tmp/cookies.txt'" },
+					success: false,
+				},
 			],
 		},
 	});
@@ -575,6 +580,8 @@ test("buildToolPresentation redacts failed stateful batch details", async () => 
 	assert.doesNotMatch((presentation.content[0] as { text: string }).text, /cookie-secret/);
 	assert.doesNotMatch(serialized, /cookie-secret/);
 	assert.match(serialized, /\[REDACTED\]/);
+	assert.deepEqual(presentation.batchSteps?.[1].command, ["cookies", "set", "--curl", "/tmp/cookies.txt"]);
+	assert.match(presentation.batchSteps?.[1].text ?? "", /cannot read '\/tmp\/cookies\.txt'/);
 });
 
 test("buildToolPresentation formats redacted network payload, response, and error previews", async () => {

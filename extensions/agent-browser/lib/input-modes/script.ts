@@ -11,11 +11,11 @@ import { extractUpstreamCommandTokens } from "../argv-descriptor.js";
 import { isCloseAllCommand } from "../command-taxonomy.js";
 import { redactSensitiveText, validateToolArgs } from "../runtime.js";
 import type { AgentBrowserFailureCategory, AgentBrowserObservation, AgentBrowserResultCategory, AgentBrowserSuccessCategory } from "../results/contracts.js";
+import { AGENT_BROWSER_CODE_MAX_TIMEOUT_MS } from "./types.js";
 
 export const AGENT_BROWSER_SCRIPT_CODE_MAX_BYTES = 64 * 1_024;
 export const AGENT_BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS = 120_000;
 export const AGENT_BROWSER_SCRIPT_NAMESPACE = "";
-const AGENT_BROWSER_SCRIPT_MAX_TIMEOUT_MS = 300_000;
 export const AGENT_BROWSER_SCRIPT_MAX_CALLS = 25;
 export const AGENT_BROWSER_SCRIPT_FINAL_OUTPUT_MAX_BYTES = 64 * 1_024;
 export const AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES = 1 * 1_024 * 1_024;
@@ -263,8 +263,8 @@ export async function runAgentBrowserScript(options: RunAgentBrowserScriptOption
 		return buildFailedRun({ callCount: 0, emitCount: 0, error: compiled.error, failureCategory: "validation-error", rejectedCallCount: 0, steps: [] });
 	}
 	const timeoutMs = options.timeoutMs ?? AGENT_BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS;
-	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > AGENT_BROWSER_SCRIPT_MAX_TIMEOUT_MS) {
-		return buildFailedRun({ callCount: 0, emitCount: 0, error: `script timeoutMs must be between 1 and ${AGENT_BROWSER_SCRIPT_MAX_TIMEOUT_MS}.`, failureCategory: "validation-error", rejectedCallCount: 0, steps: [] });
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > AGENT_BROWSER_CODE_MAX_TIMEOUT_MS) {
+		return buildFailedRun({ callCount: 0, emitCount: 0, error: `script timeoutMs must be between 1 and ${AGENT_BROWSER_CODE_MAX_TIMEOUT_MS}.`, failureCategory: "validation-error", rejectedCallCount: 0, steps: [] });
 	}
 	if (options.signal?.aborted) {
 		return buildFailedRun({ aborted: true, callCount: 0, emitCount: 0, error: "Script execution was aborted.", failureCategory: "aborted", rejectedCallCount: 0, steps: [] });

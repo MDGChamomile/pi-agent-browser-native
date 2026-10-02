@@ -270,7 +270,6 @@ function validatePassthrough(mode, passthrough) {
 		"package-pi": new Set(["--list-files"]),
 		lifecycle: new Set(["--keep-artifacts", "--model", "--verbose", "--timeout-ms"]),
 		"platform-target": new Set(),
-		"platform-smoke": new Set(),
 		release: new Set(),
 	};
 	const allowed = allowedByMode[mode];

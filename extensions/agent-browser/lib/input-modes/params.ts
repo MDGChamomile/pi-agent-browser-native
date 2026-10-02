@@ -2,6 +2,7 @@ import { JsonSchema, type JsonSchemaBuilder } from "../json-schema.js";
 import { StringEnum as localStringEnum, type StringEnumBuilder } from "../string-enum-schema.js";
 import { ELECTRON_DISCOVERY_DEFAULT_MAX_RESULTS, ELECTRON_DISCOVERY_MAX_RESULTS } from "../electron/discovery.js";
 import {
+	AGENT_BROWSER_CODE_MAX_TIMEOUT_MS,
 	AGENT_BROWSER_ELECTRON_HANDOFFS,
 	AGENT_BROWSER_ELECTRON_TARGET_TYPES,
 	AGENT_BROWSER_QA_LOAD_STATES,
@@ -82,8 +83,6 @@ export interface AgentBrowserNetworkSourceParams extends AgentBrowserOutputParam
 const AGENT_BROWSER_ADVANCED_TOOLS = ["action", "qa", "electron", "source", "network"] as const;
 export type AgentBrowserAdvancedTool = (typeof AGENT_BROWSER_ADVANCED_TOOLS)[number];
 export interface AgentBrowserToolsParams { enable?: AgentBrowserAdvancedTool[] }
-
-export const AGENT_BROWSER_CODE_MAX_TIMEOUT_MS = 300_000;
 
 function outputProperties(Type: JsonSchemaBuilder) {
 	return {

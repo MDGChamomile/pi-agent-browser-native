@@ -167,7 +167,7 @@ export async function main(argv = process.argv.slice(2)) {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   main().then(
     (exitCode) => {
       process.exitCode = exitCode;
