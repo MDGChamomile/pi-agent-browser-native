@@ -15,6 +15,10 @@
 - Host the permissioned `agent_browser_code` child with a real Node runtime from `PATH` when Pi runs as a Bun-compiled binary, and fail as `missing-binary` with a clear remediation when no Node runtime is available instead of hanging the worker handshake (#238).
 - Resolve npm `.cmd` shims on Windows in `pi-agent-browser-doctor` PATH checks so installed `agent-browser` and `pi` binaries stop producing false negatives (#219).
 
+### Fixed
+
+- Host cold-boundaries, cold-resume, and destination-cancel fixture browser sockets in a short private `0700` directory (`/tmp/piab-s-…`, via `createShortPrivateSocketDir` in the test harness) so realpath-canonicalized CI temp roots cannot exceed the macOS 103-byte Unix socket path cap. Test-only; production length and privacy guards are unchanged, and the fallback keeps the previous fixture-root path on Windows or when `/tmp` is unusable.
+
 ## 0.9.0 - 2026-10-01
 
 ### Breaking changes

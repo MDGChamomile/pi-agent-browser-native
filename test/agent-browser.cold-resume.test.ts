@@ -7,12 +7,13 @@ import test from "node:test";
 
 import {
 	createExtensionHarness,
+	createShortPrivateSocketDir,
 	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
 	withPatchedEnv,
-	writeFakeAgentBrowserBinary,
+	writeFakeAgentBrowserBinary
 } from "./helpers/agent-browser-harness.js";
 
 type ResumedPage = {
@@ -26,6 +27,7 @@ type ResumedPage = {
 
 async function withResumedPage(run: (page: ResumedPage) => Promise<void>, options: { live?: boolean; restoreDisabled?: boolean; explicit?: boolean; attached?: boolean } = {}): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "cold-"));
+	const socketDir = createShortPrivateSocketDir(root);
 	const cwd = join(root, "g");
 	const home = join(root, "h");
 	const logPath = join(root, "calls.jsonl");
@@ -69,7 +71,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 			AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
 			AGENT_BROWSER_NAMESPACE: "",
 			AGENT_BROWSER_CONFIG: undefined,
-			PI_AGENT_BROWSER_SOCKET_DIR: join(root, "s"),
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: options.restoreDisabled ? "0" : undefined,
 			PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
@@ -104,6 +106,7 @@ process.stdout.write(JSON.stringify({ success: true, data }));`);
 		});
 	} finally {
 		await rm(root, { recursive: true, force: true });
+		await rm(socketDir, { recursive: true, force: true });
 	}
 }
 

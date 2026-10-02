@@ -7,14 +7,15 @@ import test from "node:test";
 
 import { extractUpstreamCommandTokens } from "../extensions/agent-browser/lib/argv-descriptor.js";
 import {
-	type AgentBrowserToolParams,
 	createExtensionHarness,
+	createShortPrivateSocketDir,
 	createToolBranchEntry,
 	executeRegisteredTool,
 	readInvocationLog,
 	runExtensionEvent,
+	type AgentBrowserToolParams,
 	withPatchedEnv,
-	writeFakeAgentBrowserBinary,
+	writeFakeAgentBrowserBinary
 } from "./helpers/agent-browser-harness.js";
 
 const rememberedUrl = "http://127.0.0.1:43210/remembered/page";
@@ -33,6 +34,7 @@ type Page = {
 
 async function withPage(run: (page: Page) => Promise<void>, options: { live?: boolean; url?: string; explicit?: boolean; attached?: boolean; restoreDisabled?: boolean } = {}): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "cb-"));
+	const socketDir = createShortPrivateSocketDir(root);
 	const cwd = join(root, "g");
 	const home = join(root, "h");
 	const logPath = join(root, "calls.jsonl");
@@ -113,7 +115,7 @@ process.exitCode = failed ? 1 : 0;
 			HOME: home, USERPROFILE: home, AGENT_BROWSER_NAMESPACE: "",
 			// Automatic restore requires upstream encryption on Windows; this is fixture data only.
 			AGENT_BROWSER_ENCRYPTION_KEY: "a".repeat(64),
-			PI_AGENT_BROWSER_SOCKET_DIR: join(root, "s"),
+			PI_AGENT_BROWSER_SOCKET_DIR: socketDir,
 			PI_AGENT_BROWSER_MANAGED_SESSION_RESTORE: options.restoreDisabled ? "0" : undefined,
 			PI_AGENT_BROWSER_TEST_CUSTOM_SESSION_INFO: "1",
 		}, async () => {
@@ -154,6 +156,7 @@ process.exitCode = failed ? 1 : 0;
 		});
 	} finally {
 		await rm(root, { recursive: true, force: true });
+		await rm(socketDir, { recursive: true, force: true });
 	}
 }
 
