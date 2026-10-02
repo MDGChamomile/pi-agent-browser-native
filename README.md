@@ -729,7 +729,7 @@ Install upstream `agent-browser`, then install dependencies:
 npm install
 ```
 
-Use the npm version declared in `package.json` `packageManager` when refreshing `package-lock.json` (for example `npx -y npm@12.1.0 install`) so optional-platform lockfile metadata does not drift. Use Node 24.21.0 and Pi 1.0.0 or newer for lifecycle and interactive browser smokes; the pinned Pi 1.0.0 devDependencies are validation fixtures, not an exact-version requirement for the host CLI. See [Environment and automation pitfalls](docs/RELEASE.md#environment-and-automation-pitfalls) in `docs/RELEASE.md`.
+Use the npm version declared in `package.json` `packageManager` when refreshing `package-lock.json` (for example `npx -y npm@12.2.0 install`) so optional-platform lockfile metadata does not drift. Use Node 24.21.0 and Pi 1.0.0 or newer for lifecycle and interactive browser smokes; the pinned Pi 1.0.0 devDependencies are validation fixtures, not an exact-version requirement for the host CLI. See [Environment and automation pitfalls](docs/RELEASE.md#environment-and-automation-pitfalls) in `docs/RELEASE.md`.
 
 Checkout-only extension smoke test:
 
