@@ -403,7 +403,7 @@ function resolveSemanticActionVisibleRefArgsFromSnapshot(compiled: CompiledAgent
 	return { args: [...getCompiledSemanticActionSessionPrefix(compiled), ...resolution.args], snapshot: resolution.snapshot };
 }
 
-export async function resolveSemanticActionVisibleRefArgs(options: {
+async function resolveSemanticActionVisibleRefArgs(options: {
 	compiled: CompiledAgentBrowserSemanticAction | undefined;
 	cwd: string;
 	namespace?: string;

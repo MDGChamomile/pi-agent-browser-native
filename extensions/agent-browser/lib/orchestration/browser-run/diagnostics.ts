@@ -577,7 +577,7 @@ export function formatQaAttachedTargetText(target: QaAttachedTarget | undefined)
 	return ["QA attached target:", target.sessionName, target.title, target.url].filter((part): part is string => typeof part === "string" && part.length > 0).join(" — ");
 }
 
-export function buildQaAttachedRecoveryNextActions(sessionName: string | undefined): AgentBrowserNextAction[] {
+function buildQaAttachedRecoveryNextActions(sessionName: string | undefined): AgentBrowserNextAction[] {
 	const sessionArgs = (args: string[]) => withOptionalSessionArgs(sessionName, args);
 	return [
 		buildNextToolAction({

@@ -16,20 +16,16 @@ import {
 	isRefGuardedCommand,
 	isRefInvalidatingBatchCommand,
 	isUnverifiedPageTransitionCommand,
-	normalizeCommandName,
 } from "../extensions/agent-browser/lib/command-taxonomy.js";
 
-test("command taxonomy normalizes aliases once for capability predicates", () => {
-	assert.equal(normalizeCommandName("quit"), "close");
-	assert.equal(normalizeCommandName("exit"), "close");
-	assert.equal(normalizeCommandName("goto"), "open");
-	assert.equal(normalizeCommandName("navigate"), "open");
-	assert.equal(normalizeCommandName("key"), "press");
-	assert.equal(normalizeCommandName("scrollinto"), "scrollintoview");
-	assert.equal(normalizeCommandName("unknown-command"), "unknown-command");
-
+test("command taxonomy resolves aliases through capability predicates", () => {
 	assert.equal(isCloseCommand("quit"), true);
+	assert.equal(isCloseCommand("exit"), true);
+	assert.equal(isOpenNavigationCommand("goto"), true);
 	assert.equal(isOpenNavigationCommand("navigate"), true);
+	assert.equal(isRefInvalidatingBatchCommand(["key"]), true);
+	assert.equal(isRefGuardedCommand("scrollinto"), true);
+	assert.equal(isCloseCommand("unknown-command"), false);
 });
 
 test("command taxonomy keeps independent capability dimensions explicit", () => {

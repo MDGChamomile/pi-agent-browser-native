@@ -32,7 +32,7 @@ function getRouteDiagnosticReason(item: Record<string, unknown>, route: NetworkR
 	return undefined;
 }
 
-export function getNetworkRouteMode(args: string[]): NetworkRouteRecord["mode"] {
+function getNetworkRouteMode(args: string[]): NetworkRouteRecord["mode"] {
 	if (args.includes("--abort")) return "abort";
 	if (args.includes("--body")) return "body";
 	return "handler";

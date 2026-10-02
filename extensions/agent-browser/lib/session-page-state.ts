@@ -124,7 +124,7 @@ function extractStringResultField(data: unknown, fieldName: "result" | "title" |
 	return text.length > 0 ? text : undefined;
 }
 
-export function extractSessionTabTargetFromData(data: unknown): SessionTabTarget | undefined {
+function extractSessionTabTargetFromData(data: unknown): SessionTabTarget | undefined {
 	const directTarget = normalizeSessionTabTarget({
 		targetId: isRecord(data) && typeof data.targetId === "string" ? data.targetId : undefined,
 		title: extractStringResultField(data, "title"),

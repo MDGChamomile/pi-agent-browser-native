@@ -523,7 +523,7 @@ export function formatNetworkRouteDiagnosticsText(diagnostics: NetworkRouteDiagn
 	return lines.join("\n");
 }
 
-export function buildNetworkRouteDiagnosticsNextActions(diagnostics: NetworkRouteDiagnostic[] | undefined, sessionName: string | undefined): AgentBrowserNextAction[] | undefined {
+function buildNetworkRouteDiagnosticsNextActions(diagnostics: NetworkRouteDiagnostic[] | undefined, sessionName: string | undefined): AgentBrowserNextAction[] | undefined {
 	const diagnostic = diagnostics?.find((item) => item.requestId) ?? diagnostics?.[0];
 	if (!diagnostic) return undefined;
 	const actions: AgentBrowserNextAction[] = [];

@@ -11,7 +11,6 @@ import {
 	AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES,
 	AGENT_BROWSER_SCRIPT_MAX_CALLS,
 	bindBrowserCodeCall,
-	validateAgentBrowserScriptSource,
 	runAgentBrowserScript,
 	validateAgentBrowserScriptBrowserParams,
 	resolveScriptChildNodePath,
@@ -64,12 +63,14 @@ emit({kept,parallel:parallel.map(r=>r.data.value),batch:batch.data.value});`,
 	assert.deepEqual(calls.at(-1), ["batch", "--bail"]);
 });
 
-test("code validates JSON calls without restricting native commands or local authority", () => {
+test("code validates JSON calls without restricting native commands or local authority", async () => {
 	for (const args of [["close"], ["connect", "9222"], ["state", "save", "saved.json"], ["auth", "login", "example"], ["--profile", "Default", "open", "https://example.test"], ["batch", "--bail"]]) {
 		assert.deepEqual(validateAgentBrowserScriptBrowserParams({ args }).params?.args, args);
 	}
 	assert.match(validateAgentBrowserScriptBrowserParams({ args: ["get", "title"], job: {} }).error ?? "", /does not support job/);
-	assert.match(validateAgentBrowserScriptSource("💥".repeat(AGENT_BROWSER_SCRIPT_CODE_MAX_BYTES / 2)).error ?? "", /65536 bytes or less/);
+	const oversize = await runAgentBrowserScript({ code: "💥".repeat(AGENT_BROWSER_SCRIPT_CODE_MAX_BYTES / 2), dispatch: async () => ({ success: true, data: {}, resultCategory: "success" as const }) });
+	assert.equal(oversize.failureCategory, "validation-error");
+	assert.match(oversize.error ?? "", /65536 bytes or less/);
 	assert.deepEqual(bindBrowserCodeCall({ args: ["--namespace", "", "--session", "chosen", "get", "url"] }, { sessionName: "chosen" }).args, ["--namespace", "", "--session", "chosen", "get", "url"]);
 	assert.throws(() => bindBrowserCodeCall({ args: ["batch", "close --all"] }, { sessionName: "chosen" }), /namespace-wide close/);
 });

@@ -9,7 +9,7 @@ import type { SessionArtifactManifest, SessionArtifactManifestEntry } from "./re
 import { extractAgentBrowserLifecycle } from "./results/presentation/common.js";
 
 export const BROWSER_TRANSITION_ENTRY = "agent-browser-transition";
-export const BROWSER_EVENT_VERSION = 1;
+const BROWSER_EVENT_VERSION = 1;
 export const BROWSER_RESULT_TOOLS = new Set([
 	"agent_browser", "agent_browser_code", "agent_browser_action", "agent_browser_qa", "agent_browser_electron",
 	"agent_browser_source", "agent_browser_network_source",

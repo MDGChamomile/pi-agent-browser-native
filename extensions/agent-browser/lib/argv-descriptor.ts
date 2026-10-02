@@ -98,7 +98,7 @@ function getOpenCommandTarget(commandTokens: string[]): string | undefined {
 	return undefined;
 }
 
-export function parseCommandInfoFromTokens(commandTokens: string[]): CommandInfo {
+function parseCommandInfoFromTokens(commandTokens: string[]): CommandInfo {
 	const upstreamCommandTokens = stripUpstreamGlobalFlags(commandTokens);
 	const command = upstreamCommandTokens[0];
 	return {

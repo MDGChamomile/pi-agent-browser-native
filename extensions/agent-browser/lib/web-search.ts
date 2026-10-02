@@ -15,25 +15,25 @@ import {
 } from "./config.js";
 
 export const AGENT_BROWSER_WEB_SEARCH_TOOL_NAME = "agent_browser_web_search";
-export const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
-export const EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search";
-export const DEFAULT_SEARCH_RESULT_COUNT = 5;
-export const MAX_SEARCH_RESULT_COUNT = 10;
-export const SEARCH_REQUEST_TIMEOUT_MS = 15_000;
-export const EXA_DEEP_LITE_SEARCH_REQUEST_TIMEOUT_MS = 45_000;
-export const EXA_DEEP_SEARCH_REQUEST_TIMEOUT_MS = 60_000;
-export const EXA_DEEP_REASONING_SEARCH_REQUEST_TIMEOUT_MS = 90_000;
-export const EXA_DYNAMIC_HIGHLIGHTS_BETA = "dynamic-highlights-2026-08-28";
+const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search";
+const DEFAULT_SEARCH_RESULT_COUNT = 5;
+const MAX_SEARCH_RESULT_COUNT = 10;
+const SEARCH_REQUEST_TIMEOUT_MS = 15_000;
+const EXA_DEEP_LITE_SEARCH_REQUEST_TIMEOUT_MS = 45_000;
+const EXA_DEEP_SEARCH_REQUEST_TIMEOUT_MS = 60_000;
+const EXA_DEEP_REASONING_SEARCH_REQUEST_TIMEOUT_MS = 90_000;
+const EXA_DYNAMIC_HIGHLIGHTS_BETA = "dynamic-highlights-2026-08-28";
 export const WEB_SEARCH_MIN_REQUEST_INTERVAL_MS = 1_100;
 export const EXA_SEARCH_SYSTEM_PROMPT = "Prefer primary, official sources. Respect any requested version or date. Avoid duplicate or equivalent results.";
 export { EXA_SEARCH_TYPES };
 export type { ExaSearchType };
-export const WEB_SEARCH_PROVIDER_PARAM_VALUES = ["auto", ...WEB_SEARCH_PROVIDERS] as const;
+const WEB_SEARCH_PROVIDER_PARAM_VALUES = ["auto", ...WEB_SEARCH_PROVIDERS] as const;
 export type WebSearchProviderParam = typeof WEB_SEARCH_PROVIDER_PARAM_VALUES[number];
 
 type SearchFreshness = "pd" | "pw" | "pm" | "py";
 
-export const EXA_SEARCH_CATEGORIES = ["company", "people", "publication", "news", "personal site", "financial report"] as const;
+const EXA_SEARCH_CATEGORIES = ["company", "people", "publication", "news", "personal site", "financial report"] as const;
 export type ExaSearchCategory = typeof EXA_SEARCH_CATEGORIES[number];
 const MAX_EXA_DOMAIN_FILTERS = 20;
 const MAX_EXA_ADDITIONAL_QUERIES = 10;
@@ -339,7 +339,7 @@ export function cleanSearchText(value: unknown, maxLength = 500): string | undef
 	return `${cleaned.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
-export function normalizeSearchUrl(value: unknown): string | undefined {
+function normalizeSearchUrl(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	try {
 		const url = new URL(value);
@@ -403,7 +403,7 @@ function getProviderLabel(provider: WebSearchProvider): string {
 	return provider === "exa" ? "Exa" : "Brave";
 }
 
-export function formatSearchResults(provider: WebSearchProvider, query: string, results: NormalizedSearchResult[]): string {
+function formatSearchResults(provider: WebSearchProvider, query: string, results: NormalizedSearchResult[]): string {
 	const providerLabel = getProviderLabel(provider);
 	if (results.length === 0) {
 		return `No ${providerLabel} web results found for: ${query}`;
@@ -708,7 +708,7 @@ const EXA_WEB_SEARCH_ADAPTER: WebSearchProviderAdapter<ExaSearchRequest, ExaWebS
 	},
 };
 
-export const WEB_SEARCH_PROVIDER_ADAPTERS: Readonly<Record<WebSearchProvider, WebSearchProviderAdapter>> = {
+const WEB_SEARCH_PROVIDER_ADAPTERS: Readonly<Record<WebSearchProvider, WebSearchProviderAdapter>> = {
 	exa: EXA_WEB_SEARCH_ADAPTER,
 	brave: BRAVE_WEB_SEARCH_ADAPTER,
 };
@@ -717,7 +717,7 @@ export function getWebSearchProviderAdapter(provider: WebSearchProvider): WebSea
 	return WEB_SEARCH_PROVIDER_ADAPTERS[provider];
 }
 
-export function dedupeSearchResults(results: NormalizedSearchResult[]): NormalizedSearchResult[] {
+function dedupeSearchResults(results: NormalizedSearchResult[]): NormalizedSearchResult[] {
 	const seen = new Set<string>();
 	return results.filter((result) => {
 		if (seen.has(result.url)) return false;

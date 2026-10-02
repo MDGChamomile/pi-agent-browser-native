@@ -159,7 +159,7 @@ export function formatAgentBrowserRenderCall(args: unknown, theme: Theme, expand
 	return text;
 }
 
-export function formatAgentBrowserRenderResult(
+function formatAgentBrowserRenderResult(
 	result: AgentToolResult<unknown>,
 	options: { expanded: boolean; isPartial: boolean },
 	theme: Theme,

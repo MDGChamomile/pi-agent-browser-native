@@ -1,23 +1,16 @@
 import { exec as execCallback } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import {
 	SECRET_COMMAND_TIMEOUT_MS,
-	buildAgentBrowserConfigState,
-	getAgentBrowserConfigPaths,
 	getWebSearchCredentialSource,
 	getWebSearchProviderOrder,
 	loadAgentBrowserConfigStateSync,
-	mergeAgentBrowserConfig,
-	parseAgentBrowserConfigLayer,
 	resolveEnvInterpolations,
 } from "./config-policy.js";
 import type {
-	AgentBrowserConfig,
 	AgentBrowserConfigLoadOptions,
 	AgentBrowserConfigState,
-	ConfigLayer,
 	CredentialSource,
 	WebSearchProvider,
 } from "./config-policy.js";
@@ -52,8 +45,6 @@ export {
 	getWebSearchProviderLabel,
 	getWebSearchProviderOrder,
 	hasPotentialCredentialSource,
-	isPlaintextCredentialValue,
-	isProjectSafeCredentialValueForProvider,
 	isWebSearchProvider,
 	loadAgentBrowserConfigStateSync,
 	mergeAgentBrowserConfig,
@@ -85,50 +76,6 @@ export interface ResolvedCredential {
 	value: string;
 }
 
-async function readConfigLayer(path: string, scope: ConfigLayer["scope"], errors: string[], warnings: string[]): Promise<ConfigLayer | undefined> {
-	let raw: string;
-	try {
-		raw = await readFile(path, "utf8");
-	} catch (error) {
-		if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-			return undefined;
-		}
-		errors.push(`Could not read ${scope} config ${path}: ${error instanceof Error ? error.message : String(error)}`);
-		return undefined;
-	}
-	return parseAgentBrowserConfigLayer(raw, path, scope, errors, warnings);
-}
-
-export async function loadAgentBrowserConfig(options: AgentBrowserConfigLoadOptions = {}): Promise<AgentBrowserConfigState> {
-	const env = options.env ?? process.env;
-	const paths = getAgentBrowserConfigPaths({ cwd: options.cwd, env });
-	const includeProjectConfig = options.includeProjectConfig !== false;
-	const errors: string[] = [];
-	const warnings: string[] = [];
-	const layerCandidates = [
-		{ path: paths.global, scope: "global" as const },
-		...(includeProjectConfig ? [{ path: paths.project, scope: "project" as const }] : []),
-		...(paths.override ? [{ path: paths.override, scope: "override" as const }] : []),
-	];
-	const layers: ConfigLayer[] = [];
-	let mergedConfig: AgentBrowserConfig = {};
-	for (const candidate of layerCandidates) {
-		const layer = await readConfigLayer(candidate.path, candidate.scope, errors, warnings);
-		if (!layer) continue;
-		layers.push(layer);
-		mergedConfig = mergeAgentBrowserConfig(mergedConfig, layer.config);
-	}
-	return buildAgentBrowserConfigState({
-		env,
-		errors,
-		layers,
-		mergedConfig,
-		paths,
-		projectConfigIncluded: includeProjectConfig,
-		warnings,
-	});
-}
-
 export function loadAgentBrowserConfigSync(options: AgentBrowserConfigLoadOptions = {}): AgentBrowserConfigState {
 	return loadAgentBrowserConfigStateSync(options);
 }
@@ -150,7 +97,7 @@ async function resolveCommandCredential(rawValue: string, signal?: AbortSignal):
 	}
 }
 
-export async function resolveCredentialSource(
+async function resolveCredentialSource(
 	source: CredentialSource | undefined,
 	options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
 ): Promise<ResolvedCredential | undefined> {

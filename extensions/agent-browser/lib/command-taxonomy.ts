@@ -321,10 +321,6 @@ function hasCommandCapability(command: string | undefined, capability: CommandCa
 	return getCommandCapability(command)?.[capability] === true;
 }
 
-export function normalizeCommandName(command: string | undefined): string | undefined {
-	return getCommandCapability(command)?.command ?? command;
-}
-
 export function isCloseCommand(command: string | undefined): boolean {
 	return hasCommandCapability(command, "closesSession");
 }

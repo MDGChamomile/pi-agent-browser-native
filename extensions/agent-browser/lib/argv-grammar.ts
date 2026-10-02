@@ -40,7 +40,7 @@ export const GLOBAL_VALUE_FLAGS = [
 	"--input-mode",
 ] as const;
 
-export const COMMAND_VALUE_FLAGS = [
+const COMMAND_VALUE_FLAGS = [
 	"--allowed-origins",
 	"--baseline",
 	"--body",
@@ -82,7 +82,7 @@ export const COMMAND_VALUE_FLAGS = [
 	"--wait-until",
 ] as const;
 
-export const OPTIONAL_GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--restore"]);
+const OPTIONAL_GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--restore"]);
 export const VALUE_FLAGS: ReadonlySet<string> = new Set([...GLOBAL_VALUE_FLAGS, ...COMMAND_VALUE_FLAGS]);
 export const PREVALIDATED_VALUE_FLAGS: ReadonlySet<string> = new Set(GLOBAL_VALUE_FLAGS);
 export const GLOBAL_VALUE_FLAGS_ALLOWING_DASH_VALUE: ReadonlySet<string> = new Set(["--args", "--session"]);
@@ -258,7 +258,7 @@ export function extractRequestedRestoreKey(args: string[], sessionName: string, 
 	return restoreKey;
 }
 
-export function getFlagName(token: string): string {
+function getFlagName(token: string): string {
 	return token.split("=", 1)[0] ?? token;
 }
 

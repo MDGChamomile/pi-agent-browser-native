@@ -21,8 +21,8 @@ import { createSecureTempDirectory, preserveSecureTempDirectory } from "../temp.
 export type { ElectronCdpTarget, ElectronCdpVersion } from "./cdp.js";
 
 export const ELECTRON_LAUNCH_RECORD_VERSION = 1;
-export const ELECTRON_LAUNCH_DEFAULT_TIMEOUT_MS = 15_000;
-export const ELECTRON_LAUNCH_MAX_TIMEOUT_MS = 120_000;
+const ELECTRON_LAUNCH_DEFAULT_TIMEOUT_MS = 15_000;
+const ELECTRON_LAUNCH_MAX_TIMEOUT_MS = 120_000;
 
 const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 export const ELECTRON_PROFILE_DIR_PREFIX = "electron-profile-";
@@ -162,7 +162,7 @@ function policyEntryMatchesApp(entry: string, app: ElectronAppDiscovery): boolea
 	return appIdentifiers(app).some((identifier) => identifier.toLowerCase().includes(normalizedEntry));
 }
 
-export function evaluateElectronLaunchPolicy(options: {
+function evaluateElectronLaunchPolicy(options: {
 	allow?: string[];
 	deny?: string[];
 	target: ElectronAppDiscovery;
@@ -187,7 +187,7 @@ export function evaluateElectronLaunchPolicy(options: {
 	return undefined;
 }
 
-export async function resolveElectronLaunchTarget(options: ResolveElectronTargetOptions): Promise<ElectronAppDiscovery | undefined> {
+async function resolveElectronLaunchTarget(options: ResolveElectronTargetOptions): Promise<ElectronAppDiscovery | undefined> {
 	if (options.appPath) return inspectElectronAppPath(options.appPath);
 	if (options.executablePath) return inspectElectronExecutablePath(options.executablePath);
 	const query = options.bundleId ?? options.appName;
