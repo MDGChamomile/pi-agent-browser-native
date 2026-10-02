@@ -17,6 +17,14 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 const verifyPackageModulePath = "../scripts/verify-package.mjs";
 
+interface PackResult {
+	entryCount: number;
+	filename: string;
+	files: Array<{ path: string }>;
+	size: number;
+	unpackedSize: number;
+}
+
 interface PublishContract {
 	declaredPackageFiles: string[];
 	forbiddenPackedFiles: string[];
@@ -33,7 +41,7 @@ const verifyPackageModule = (await import(verifyPackageModulePath)) as {
 	packToTemporaryPackageDir: (cwd?: string) => Promise<{
 		cleanup: () => Promise<void>;
 		packageDir: string;
-		packResult: { filename: string };
+		packResult: PackResult;
 	}>;
 	collectVerificationFailures: (options: {
 		forbiddenPackedFiles: string[];
@@ -44,13 +52,7 @@ const verifyPackageModule = (await import(verifyPackageModulePath)) as {
 	evaluatePackResult: (options: {
 		forbiddenRepoFiles: string[];
 		missingRepoFiles: string[];
-		packResult: {
-			entryCount: number;
-			filename: string;
-			files: Array<{ path: string }>;
-			size: number;
-			unpackedSize: number;
-		};
+		packResult: PackResult;
 		publishContract: Pick<PublishContract, "forbiddenPackedFiles" | "requiredPackedFiles">;
 	}) => {
 		failures: string[];
@@ -282,6 +284,20 @@ test("publish contract derives required packed files from package.json", async (
 	assert.equal(publishContract.requiredPackedFiles.includes("dist/extensions/agent-browser/lib/parsing.js"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("dist/extensions/agent-browser/lib/playbook.js"), true);
 	assert.equal(publishContract.requiredPackedFiles.includes("dist/extensions/agent-browser/lib/results/snapshot.js"), true);
+	for (const path of [
+		"docs/platform-smoke.md",
+		"platform-smoke.config.mjs",
+		"scripts/platform-smoke.mjs",
+		"scripts/platform-smoke/artifacts.mjs",
+		"scripts/platform-smoke/crabbox-runner.mjs",
+		"scripts/platform-smoke/doctor.mjs",
+		"scripts/platform-smoke/targets.mjs",
+		"scripts/platform-smoke/platform-build-windows.ps1",
+		"scripts/platform-smoke/browser-dogfood-windows.ps1",
+		"scripts/platform-smoke/linux-image/Dockerfile",
+	]) {
+		assert.ok(publishContract.requiredPackedFiles.includes(path), `expected publish contract to require ${path}`);
+	}
 	assert.equal(publishContract.requiredPackedFiles.includes("extensions/agent-browser/index.ts"), false);
 });
 
@@ -336,22 +352,51 @@ test("evaluatePackResult uses the shared publish contract", async () => {
 	assert.deepEqual(report.forbiddenPackedFiles, []);
 });
 
-test("evaluatePackResult rejects forbidden directory prefixes", () => {
-	const report = evaluatePackResult({
-		forbiddenRepoFiles: [],
-		missingRepoFiles: [],
-		packResult: {
-			entryCount: 2,
-			filename: "fixture.tgz",
-			files: [{ path: "package.json" }, { path: "docs/plans/internal.md" }],
-			size: 123,
-			unpackedSize: 456,
-		},
-		publishContract: { forbiddenPackedFiles: ["docs/plans/"], requiredPackedFiles: ["package.json"] },
-	});
-
-	assert.deepEqual(report.forbiddenPackedFiles, ["docs/plans/"]);
-	assert.deepEqual(report.failures, ["Forbidden packed file present: docs/plans/"]);
+test("evaluatePackResult rejects private paths and tarballs without rejecting neighboring names", async () => {
+	const publishContract = await loadPublishContract();
+	for (const [path, forbidden] of [
+		["docs/plans/internal.md", ["docs/plans/"]],
+		["docs/plans/.secret.md", ["docs/plans/"]],
+		["AGENTS.md", ["AGENTS.md"]],
+		[".artifacts/nested/report.json", [".artifacts/"]],
+		[".artifacts/.hidden/foo", [".artifacts/"]],
+		[".crabbox/lease.json", [".crabbox/"]],
+		[".crabbox/.lease", [".crabbox/"]],
+		[".debug/log.txt", [".debug/"]],
+		[".debug/.hidden/log.txt", [".debug/"]],
+		[".platform-smoke-runs/report.json", [".platform-smoke-runs/"]],
+		[".platform-smoke-runs/.receipt", [".platform-smoke-runs/"]],
+		[".env", [".env*"]],
+		[".env.local", [".env*"]],
+		[".env-fixture/private.txt", [".env*"]],
+		[".env-dir/.secret", [".env*"]],
+		["package.tgz", ["**/*.tgz"]],
+		["nested/package.tgz", ["**/*.tgz"]],
+		[".tgz", ["**/*.tgz"]],
+		[".hidden.tgz", ["**/*.tgz"]],
+		["nested/.hidden.tgz", ["**/*.tgz"]],
+		["nested/.hidden/file.tgz", ["**/*.tgz"]],
+		["docs/plans-public.md", []],
+		["docs/AGENTS.md", []],
+		[".artifacts-public.json", []],
+		["docs/env.md", []],
+		["archive.tgz.md", []],
+	] as const) {
+		const report = evaluatePackResult({
+			forbiddenRepoFiles: [],
+			missingRepoFiles: [],
+			packResult: {
+				entryCount: 2,
+				filename: "fixture.tgz",
+				files: [{ path: "package.json" }, { path }],
+				size: 123,
+				unpackedSize: 456,
+			},
+			publishContract: { forbiddenPackedFiles: publishContract.forbiddenPackedFiles, requiredPackedFiles: ["package.json"] },
+		});
+		assert.deepEqual(report.forbiddenPackedFiles, [...forbidden], path);
+		assert.deepEqual(report.failures, forbidden.length ? [`Forbidden packed file present: ${forbidden.join(", ")}`] : [], path);
+	}
 });
 
 test("verifyPackageRelease lets prepare create a missing dist directory", async () => {
@@ -379,6 +424,13 @@ test("packToTemporaryPackageDir writes a tarball even under npm publish dry-run 
 		packed = await packToTemporaryPackageDir();
 		await access(join(packed.packageDir, "package.json"));
 		assert.match(packed.packResult.filename, /^pi-agent-browser-native-.*\.tgz$/);
+		const report = evaluatePackResult({
+			forbiddenRepoFiles: [],
+			missingRepoFiles: [],
+			packResult: packed.packResult,
+			publishContract: await loadPublishContract(),
+		});
+		assert.deepEqual(report.failures, [], "real tarball must satisfy the canonical required and forbidden paths");
 	} finally {
 		if (previousDryRun === undefined) {
 			delete process.env.npm_config_dry_run;

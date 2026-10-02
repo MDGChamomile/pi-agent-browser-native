@@ -19,6 +19,12 @@ class PublishContractError extends Error {
 export const REQUIRED_REPO_FILES = Object.freeze(["LICENSE"]);
 export const FORBIDDEN_REPO_FILES = Object.freeze([".pi/extensions/agent-browser.ts"]);
 export const FORBIDDEN_PACKED_FILES = Object.freeze([
+	".artifacts/",
+	".crabbox/",
+	".debug/",
+	".platform-smoke-runs/",
+	".env*",
+	"**/*.tgz",
 	".pi/extensions/agent-browser.ts",
 	"AGENTS.md",
 	"docs/plans/",

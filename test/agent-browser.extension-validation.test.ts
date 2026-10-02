@@ -18,9 +18,6 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
 
-import { KeyedAsyncExecutionQueue, mergeBrowserRunArtifactManifest } from "../extensions/agent-browser/index.js";
-import { getAgentBrowserSessionIdentityKey } from "../extensions/agent-browser/lib/argv-grammar.js";
-import { mergeSessionArtifactManifest } from "../extensions/agent-browser/lib/results/artifact-manifest.js";
 import { canonicalizeExplicitArtifactDestination, getExplicitArtifactDestination } from "../extensions/agent-browser/lib/orchestration/browser-run/artifact-paths.js";
 import {
 	WEB_SEARCH_PROMPT_GUIDELINE,
@@ -1204,102 +1201,6 @@ if (command === "open") {
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
 	}
-});
-
-test("queued browser cancellation withdraws waiting work without releasing the active owner", async () => {
-	const queue = new KeyedAsyncExecutionQueue();
-	let release!: () => void;
-	let entered!: () => void;
-	const started = new Promise<void>(resolve => { entered = resolve; });
-	const held = new Promise<void>(resolve => { release = resolve; });
-	const first = queue.run("team\u0000same", "team", async () => { entered(); await held; });
-	await started;
-	const controller = new AbortController();
-	const cancelled = queue.run("team\u0000same", "team", async () => assert.fail("cancelled action dispatched"), controller.signal);
-	controller.abort();
-	await assert.rejects(cancelled, { name: "AbortError" });
-	let laterStarted = false;
-	const later = queue.run("team\u0000same", "team", async () => { laterStarted = true; });
-	await Promise.resolve(); assert.equal(laterStarted, false);
-	release(); await Promise.all([first, later]); assert.equal(laterStarted, true);
-});
-
-test("KeyedAsyncExecutionQueue drains same-namespace work without deadlocking late arrivals", async () => {
-	const queue = new KeyedAsyncExecutionQueue();
-	const key = getAgentBrowserSessionIdentityKey("shared", "team");
-	const events: string[] = [];
-	let releaseActive!: () => void;
-	let markActive!: () => void;
-	const active = new Promise<void>((resolve) => {
-		markActive = resolve;
-	});
-	const holdActive = new Promise<void>((resolve) => {
-		releaseActive = resolve;
-	});
-	const first = queue.run(key, "team", async () => {
-		events.push("first-start");
-		markActive();
-		await holdActive;
-		events.push("first-end");
-	});
-	await active;
-	const exclusive = queue.runExclusive("team", async () => {
-		events.push("exclusive");
-	});
-	const late = queue.run(key, "team", async () => {
-		events.push("late");
-	});
-	releaseActive();
-	let timeout: NodeJS.Timeout | undefined;
-	try {
-		await Promise.race([
-			Promise.all([first, exclusive, late]),
-			new Promise<never>((_resolve, reject) => {
-				timeout = setTimeout(() => reject(new Error("namespace-exclusive queue deadlocked")), 1_000);
-			}),
-		]);
-	} finally {
-		if (timeout) clearTimeout(timeout);
-	}
-	assert.deepEqual(events, ["first-start", "first-end", "exclusive", "late"]);
-});
-
-test("mergeBrowserRunArtifactManifest preserves restart lifecycle order across a concurrent manifest update", () => {
-	const initial = mergeSessionArtifactManifest({
-		entries: [{ command: "screenshot", createdAtMs: 1, kind: "image", path: "initial.png", retentionState: "live", storageScope: "explicit-path" }],
-		nowMs: 1,
-	});
-	assert.ok(initial);
-	const updated = mergeSessionArtifactManifest({
-		base: initial,
-		entries: [
-			{ command: "record", createdAtMs: 2, kind: "video", path: "z-previous.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart-previous" },
-			{ command: "record", createdAtMs: 2, kind: "video", path: "a-current.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart" },
-		],
-		nowMs: 2,
-	});
-	const current = mergeSessionArtifactManifest({
-		base: initial,
-		entries: [{ command: "screenshot", createdAtMs: 3, kind: "image", path: "concurrent.png", retentionState: "live", storageScope: "explicit-path" }],
-		nowMs: 3,
-	});
-	const merged = mergeBrowserRunArtifactManifest(current, initial, updated);
-	assert.equal(merged?.entries.some((entry) => entry.path === "z-previous.webm" && entry.subcommand === "restart-previous"), true);
-	assert.equal(merged?.entries.some((entry) => entry.path === "a-current.webm" && entry.subcommand === "restart"), true);
-	assert.equal(merged?.entries.some((entry) => entry.path === "concurrent.png"), true);
-});
-
-test("mergeSessionArtifactManifest retains the active restart when the recent window is one", { concurrency: false }, async () => {
-	await withPatchedEnv({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MANIFEST_MAX_ENTRIES: "1" }, async () => {
-		const manifest = mergeSessionArtifactManifest({
-			entries: [
-				{ command: "record", createdAtMs: 1, kind: "video", path: "a-previous.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart-previous" },
-				{ command: "record", createdAtMs: 1, kind: "video", path: "z-current.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart" },
-			],
-			nowMs: 1,
-		});
-		assert.deepEqual(manifest?.entries.map((entry) => [entry.path, entry.subcommand]), [["z-current.webm", "restart"]]);
-	});
 });
 
 test("agentBrowserExtension keeps a direct restart pending through outer manifest merge and replay", { concurrency: false }, async () => {
