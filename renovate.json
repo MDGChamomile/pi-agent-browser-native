@@ -11,6 +11,11 @@
       "description": "Windows launcher resolution must match cross-spawn 7's public which/path-key dependency line.",
       "matchPackageNames": ["which", "path-key", "@types/which"],
       "enabled": false
+    },
+    {
+      "description": "typebox devDependency mirrors the TypeBox nested by the pinned official Pi graph; bump it only together with that graph pin.",
+      "matchPackageNames": ["typebox"],
+      "allowedVersions": "1.3.27"
     }
   ]
 }
