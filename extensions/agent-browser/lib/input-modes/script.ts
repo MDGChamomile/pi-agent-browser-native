@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import which from "which";
 
 import { isRecord } from "../parsing.js";
 import { extractExplicitNamespace, extractExplicitSessionName, scanUpstreamGlobalFlagOccurrences } from "../argv-grammar.js";
@@ -19,6 +20,22 @@ export const AGENT_BROWSER_SCRIPT_MAX_CALLS = 25;
 export const AGENT_BROWSER_SCRIPT_FINAL_OUTPUT_MAX_BYTES = 64 * 1_024;
 export const AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES = 1 * 1_024 * 1_024;
 export const AGENT_BROWSER_SCRIPT_IPC_CUMULATIVE_MAX_BYTES = 8 * 1_024 * 1_024;
+
+/**
+ * Resolve the Node runtime that hosts the permissioned code child. A Bun-compiled Pi binary
+ * points `process.execPath` at the pi executable, which rejects Node-only flags like
+ * `--permission`, so those hosts must spawn a real `node` from PATH instead.
+ */
+export function resolveScriptChildNodePath(options: {
+	runtime: { bun?: string };
+	execPath: string;
+	whichNode: () => string | null;
+}): string {
+	if (options.runtime.bun === undefined) return options.execPath;
+	const nodePath = options.whichNode();
+	if (nodePath === null) throw new Error("agent_browser_code requires a `node` runtime on PATH when pi runs on a Bun binary.");
+	return nodePath;
+}
 
 function findPackageRoot(startDir: string): string {
 	let currentDir = startDir;
@@ -260,8 +277,15 @@ export async function runAgentBrowserScript(options: RunAgentBrowserScriptOption
 		const message = error instanceof Error ? error.message : "Compiled script worker is missing.";
 		return buildFailedRun({ callCount: 0, emitCount: 0, error: message, failureCategory: "missing-binary", rejectedCallCount: 0, steps: [] });
 	}
+	let childNodePath: string;
+	try {
+		childNodePath = resolveScriptChildNodePath({ runtime: { bun: process.versions.bun }, execPath: process.execPath, whichNode: () => which.sync("node", { nothrow: true }) });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "No Node runtime is available for the code child.";
+		return buildFailedRun({ callCount: 0, emitCount: 0, error: message, failureCategory: "missing-binary", rejectedCallCount: 0, steps: [] });
+	}
 
-	const child = spawn(process.execPath, [
+	const child = spawn(childNodePath, [
 		"--permission",
 		"--max-old-space-size=64",
 		workerPath,

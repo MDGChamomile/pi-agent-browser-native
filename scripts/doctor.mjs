@@ -124,13 +124,21 @@ export function parseCliArgs(argv = process.argv.slice(2)) {
 }
 
 async function defaultRunAgentBrowser(args) {
-	const { stdout, stderr } = await execFile("agent-browser", args, { maxBuffer: 1024 * 1024 });
+	const { stdout, stderr } = await execFile("agent-browser", args, { maxBuffer: 1024 * 1024, ...buildNpmShimExecOptions(process.platform) });
 	return `${stdout}${stderr}`;
 }
 
 async function defaultRunPi(args) {
-	const { stdout, stderr } = await execFile("pi", args, { maxBuffer: 1024 * 1024 });
+	const { stdout, stderr } = await execFile("pi", args, { maxBuffer: 1024 * 1024, ...buildNpmShimExecOptions(process.platform) });
 	return `${stdout}${stderr}`;
+}
+
+/**
+ * npm's global bin shims on Windows are `.cmd` files that `execFile` cannot launch without a
+ * shell. Doctor only passes fixed flag arrays here, so shell composition stays safe.
+ */
+export function buildNpmShimExecOptions(platform = process.platform) {
+	return platform === "win32" ? { shell: true } : {};
 }
 
 async function defaultPathExists(path) {
