@@ -135,12 +135,3 @@ export function getUpstreamEffectiveBatchSteps(commandTokens: readonly string[],
 	if (argumentSteps.length > 0) return argumentSteps;
 	return parseUserBatchStdin(stdin).steps ?? [];
 }
-
-export function parseValidBatchStepEntries(stdin: string | undefined): Array<{ index: number; step: BatchCommandStep }> {
-	const parsed = parseBatchStdinJsonArray(stdin);
-	if (parsed.error || parsed.steps === undefined) return [];
-	return parsed.steps.flatMap((step, index) => {
-		const validated = validateUserBatchStep(step, index);
-		return validated.ok ? [{ index, step: validated.step }] : [];
-	});
-}

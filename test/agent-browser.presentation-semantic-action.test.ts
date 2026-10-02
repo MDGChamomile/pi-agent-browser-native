@@ -7,7 +7,6 @@ import test from "node:test";
 
 import { buildToolPresentation } from "../extensions/agent-browser/lib/results/presentation.js";
 import {
-	formatSemanticActionCompactLine,
 	formatSemanticActionPresentationText,
 	shouldCaptureSemanticActionNavigationSummary,
 } from "../extensions/agent-browser/lib/results/presentation/semantic-action.js";
@@ -17,12 +16,6 @@ const semanticClick = {
 	locator: "text" as const,
 	args: ["find", "text", "Close", "click"],
 };
-
-test("formatSemanticActionCompactLine avoids raw located-selector clicked tokens", () => {
-	const line = formatSemanticActionCompactLine(semanticClick);
-	assert.match(line, /Clicked: text "Close"/);
-	assert.doesNotMatch(line, /data-agent-browser-located/);
-});
 
 test("formatSemanticActionPresentationText prefers compact action line over located selector", () => {
 	const text = formatSemanticActionPresentationText(semanticClick, {

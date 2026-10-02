@@ -25,10 +25,9 @@ import {
 import { buildProcessStartIdentityCommand, buildProcessStartIdentityCommands, normalizeProcessStartIdentity, processStartIdentitiesMatch, resolveProcessStartIdentityFromCommands } from "../extensions/agent-browser/lib/process-identity.js";
 import {
 	buildAgentBrowserProcessEnv,
-	ensureAgentBrowserSocketDir,
+	getAgentBrowserSocketDirValidationError,
 	getAgentBrowserProcessTimeoutMs,
 	getAgentBrowserSocketPathValidationError,
-	getAgentBrowserSocketDirValidationError,
 	isTrustedAndroidAppDataRoot,
 	isTrustedSocketDirAncestor,
 	prepareAgentBrowserSpawnArgs,
@@ -278,28 +277,29 @@ test("agent-browser socket storage rejects unsafe permissions, ancestry, symlink
 		const insecureDir = join(tempDir, "insecure");
 		await mkdir(insecureDir, { mode: 0o700 });
 		await chmod(insecureDir, 0o777);
-		assert.equal(await ensureAgentBrowserSocketDir(insecureDir, uid), false);
+		assert.match(await getAgentBrowserSocketDirValidationError(insecureDir, uid) ?? "", /the directory mode is 777, not 700/);
 		assert.equal((await stat(insecureDir)).mode & 0o777, 0o777);
 
 		const secureDir = join(tempDir, "secure");
-		assert.equal(await ensureAgentBrowserSocketDir(secureDir, uid), true);
+		assert.equal(await getAgentBrowserSocketDirValidationError(secureDir, uid), undefined);
 		assert.equal((await stat(secureDir)).mode & 0o777, 0o700);
 		await symlink(insecureDir, join(secureDir, "planted"), "dir");
-		assert.equal(await ensureAgentBrowserSocketDir(secureDir, uid), false);
+		assert.match(await getAgentBrowserSocketDirValidationError(secureDir, uid) ?? "", /foreign-owned, symlink, special, or excessively deep/);
 
 		const symlinkPath = join(tempDir, "link");
 		await symlink(insecureDir, symlinkPath, "dir");
-		assert.equal(await ensureAgentBrowserSocketDir(symlinkPath, uid), false);
-		assert.equal(await ensureAgentBrowserSocketDir(join(symlinkPath, "socket"), uid), false);
+		assert.match(await getAgentBrowserSocketDirValidationError(symlinkPath, uid) ?? "", /the path is not a directory/);
+		assert.match(await getAgentBrowserSocketDirValidationError(join(symlinkPath, "socket"), uid) ?? "", /an ancestor is writable, foreign-owned/);
 
 		const unsafeParent = join(tempDir, "unsafe-parent");
 		await mkdir(unsafeParent, { mode: 0o700 });
 		await chmod(unsafeParent, 0o777);
-		assert.equal(await ensureAgentBrowserSocketDir(join(unsafeParent, "socket"), uid), false);
+		assert.match(await getAgentBrowserSocketDirValidationError(join(unsafeParent, "socket"), uid) ?? "", /an ancestor is writable, foreign-owned/);
 
 		const foreignDir = join(tempDir, "foreign");
 		await mkdir(foreignDir, { mode: 0o700 });
-		assert.equal(await ensureAgentBrowserSocketDir(foreignDir, uid + 1), false);
+		// A different validating uid sees the trusted temp ancestry itself as foreign, so ancestry rejects first.
+		assert.match(await getAgentBrowserSocketDirValidationError(foreignDir, uid + 1) ?? "", /an ancestor is writable, foreign-owned/);
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
 	}
@@ -347,7 +347,8 @@ test("agent-browser socket storage validates root-owned alias destination ancest
 				await symlink(target, alias, "dir");
 				const socketDir = join(alias, `socket-${name}`);
 				const entriesBefore = await readdir(aliases);
-				assert.equal(await ensureAgentBrowserSocketDir(socketDir, uid), accepted);
+				const validation = await getAgentBrowserSocketDirValidationError(socketDir, uid);
+				assert.equal(validation === undefined, accepted);
 				assert.equal(await readlink(alias), target);
 				assert.deepEqual(await readdir(aliases), entriesBefore);
 				if (accepted) {

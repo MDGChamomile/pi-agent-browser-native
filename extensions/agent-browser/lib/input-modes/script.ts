@@ -15,11 +15,11 @@ import type { AgentBrowserFailureCategory, AgentBrowserObservation, AgentBrowser
 export const AGENT_BROWSER_SCRIPT_CODE_MAX_BYTES = 64 * 1_024;
 export const AGENT_BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS = 120_000;
 export const AGENT_BROWSER_SCRIPT_NAMESPACE = "";
-export const AGENT_BROWSER_SCRIPT_MAX_TIMEOUT_MS = 300_000;
+const AGENT_BROWSER_SCRIPT_MAX_TIMEOUT_MS = 300_000;
 export const AGENT_BROWSER_SCRIPT_MAX_CALLS = 25;
 export const AGENT_BROWSER_SCRIPT_FINAL_OUTPUT_MAX_BYTES = 64 * 1_024;
 export const AGENT_BROWSER_SCRIPT_IPC_MESSAGE_MAX_BYTES = 1 * 1_024 * 1_024;
-export const AGENT_BROWSER_SCRIPT_IPC_CUMULATIVE_MAX_BYTES = 8 * 1_024 * 1_024;
+const AGENT_BROWSER_SCRIPT_IPC_CUMULATIVE_MAX_BYTES = 8 * 1_024 * 1_024;
 
 /**
  * Resolve the Node runtime that hosts the permissioned code child. A Bun-compiled Pi binary
@@ -106,7 +106,7 @@ type ScriptParentMessage =
 	| { code: string; type: "start" }
 	| { envelope: AgentBrowserScriptBrowserEnvelope; id: number; type: "response" };
 
-export function validateAgentBrowserScriptSource(input: unknown): { error?: string } {
+function validateAgentBrowserScriptSource(input: unknown): { error?: string } {
 	if (typeof input !== "string") return { error: "script must be a string." };
 	const bytes = Buffer.byteLength(input, "utf8");
 	return bytes > AGENT_BROWSER_SCRIPT_CODE_MAX_BYTES

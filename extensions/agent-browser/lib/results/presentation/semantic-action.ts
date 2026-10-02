@@ -32,7 +32,7 @@ function formatSemanticActionTarget(compiled: CompiledAgentBrowserSemanticAction
 	return name ? `${target} (name ${JSON.stringify(name)})` : target;
 }
 
-export function formatSemanticActionCompactLine(compiled: CompiledAgentBrowserSemanticAction): string {
+function formatSemanticActionCompactLine(compiled: CompiledAgentBrowserSemanticAction): string {
 	const target = formatSemanticActionTarget(compiled);
 	switch (compiled.action) {
 		case "click":
@@ -48,7 +48,7 @@ export function formatSemanticActionCompactLine(compiled: CompiledAgentBrowserSe
 	}
 }
 
-export function resolveSemanticPresentationCommand(
+function resolveSemanticPresentationCommand(
 	compiled: CompiledAgentBrowserSemanticAction | undefined,
 ): string | undefined {
 	if (!compiled || !SEMANTIC_PRESENTATION_ACTIONS.has(compiled.action)) return undefined;

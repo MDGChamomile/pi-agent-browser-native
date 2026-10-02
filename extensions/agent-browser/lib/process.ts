@@ -339,13 +339,6 @@ export async function getAgentBrowserSocketDirValidationError(
 	}
 }
 
-export async function ensureAgentBrowserSocketDir(
-	socketDir: string,
-	uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined,
-): Promise<boolean> {
-	return await getAgentBrowserSocketDirValidationError(socketDir, uid) === undefined;
-}
-
 export function getAgentBrowserSocketPathValidationError(options: {
 	args: string[];
 	env?: NodeJS.ProcessEnv;

@@ -97,13 +97,13 @@ export function buildMissingBinaryMessage(): string {
 
 const SEMANTIC_ACTION_CANDIDATE_ACTION_IDS = new Set(["try-button-name-candidate", "try-link-name-candidate"]);
 
-export function formatSemanticActionCandidateText(actions: AgentBrowserNextAction[]): string | undefined {
+function formatSemanticActionCandidateText(actions: AgentBrowserNextAction[]): string | undefined {
 	const candidateActions = actions.filter((action) => SEMANTIC_ACTION_CANDIDATE_ACTION_IDS.has(action.id) && action.params?.args);
 	if (candidateActions.length === 0) return undefined;
 	return ["Agent-browser candidate fallbacks:", ...candidateActions.map((action) => `- ${action.id}: agent_browser ${JSON.stringify({ args: action.params?.args })} — ${action.reason}`)].join("\n");
 }
 
-export function buildSemanticActionCandidateActions(compiled: CompiledAgentBrowserSemanticAction): AgentBrowserNextAction[] {
+function buildSemanticActionCandidateActions(compiled: CompiledAgentBrowserSemanticAction): AgentBrowserNextAction[] {
 	const commandIndex = getCompiledSemanticActionCommandIndex(compiled);
 	if (commandIndex < 0 || compiled.args[commandIndex] !== "find") return [];
 	const locator = compiled.args[commandIndex + 1];

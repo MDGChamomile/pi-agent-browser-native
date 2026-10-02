@@ -18,7 +18,6 @@ import {
 	getWebSearchProviderConfigKey,
 	getWebSearchProviderEnvVar,
 	getCredentialSourceSummary,
-	loadAgentBrowserConfig,
 	loadAgentBrowserConfigSync,
 	resolveWebSearchCredential,
 } from "../extensions/agent-browser/lib/config.js";
@@ -70,7 +69,7 @@ test("uses project config over global config and allows project-local Brave cred
 	await writeJson(fixture.globalPath, { version: 1, webSearch: { braveApiKey: "$GLOBAL_BRAVE_KEY" } });
 
 	await writeJson(fixture.projectPath, { version: 1, webSearch: { braveApiKey: "plaintext-secret" } });
-	const plaintextState = await loadAgentBrowserConfig({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" } });
+	const plaintextState = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" } });
 	assert.deepEqual(plaintextState.errors, []);
 	assert.equal(canRegisterWebSearchTool(plaintextState, { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" }), true);
 	assert.equal(getCredentialSourceSummary(plaintextState.webSearchCredentialSources.brave, "brave"), "configured as plaintext project value [redacted]");
@@ -78,13 +77,13 @@ test("uses project config over global config and allows project-local Brave cred
 	assert.equal(plaintextResolved?.value, "plaintext-secret");
 
 	await writeJson(fixture.projectPath, { version: 1, webSearch: { braveApiKey: "!echo command-secret" } });
-	const commandState = await loadAgentBrowserConfig({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" } });
+	const commandState = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" } });
 	assert.deepEqual(commandState.errors, []);
 	assert.equal(canRegisterWebSearchTool(commandState, { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret" }), true);
 	assert.equal(getCredentialSourceSummary(commandState.webSearchCredentialSources.brave, "brave"), "configured via command (project)");
 
 	await writeJson(fixture.projectPath, { version: 1, webSearch: { braveApiKey: "$PROJECT_BRAVE_ALIAS" } });
-	const envState = await loadAgentBrowserConfig({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret", PROJECT_BRAVE_ALIAS: "alias-secret" } });
+	const envState = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: { ...fixture.env, GLOBAL_BRAVE_KEY: "global-secret", PROJECT_BRAVE_ALIAS: "alias-secret" } });
 	assert.deepEqual(envState.errors, []);
 	assert.equal(canRegisterWebSearchTool(envState, { ...fixture.env, PROJECT_BRAVE_ALIAS: "alias-secret" }), true);
 	const envResolved = await resolveWebSearchCredential(envState, "brave", { env: { ...fixture.env, PROJECT_BRAVE_ALIAS: "alias-secret" } });
@@ -223,7 +222,7 @@ test("merges and validates the default Exa search type", async () => {
 test("allows project-local Exa key sources", async () => {
 	const fixture = await createConfigFixture();
 	await writeJson(fixture.projectPath, { version: 1, webSearch: { exaApiKey: "plaintext-secret" } });
-	const state = await loadAgentBrowserConfig({ cwd: fixture.cwd, env: fixture.env });
+	const state = loadAgentBrowserConfigSync({ cwd: fixture.cwd, env: fixture.env });
 	assert.deepEqual(state.errors, []);
 	assert.equal(canRegisterWebSearchTool(state, fixture.env), true);
 	const resolved = await resolveWebSearchCredential(state, "exa", { env: fixture.env });

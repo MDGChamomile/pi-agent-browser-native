@@ -242,21 +242,6 @@ function validateBrowserDefaultProfile(value, path, errors) {
 	return { name, policy: /** @type {BrowserDefaultProfilePolicy} */ (policy) };
 }
 
-/** @param {string} rawValue */
-export function isPlaintextCredentialValue(rawValue) {
-	const trimmed = rawValue.trim();
-	return Boolean(trimmed) && !trimmed.startsWith("!") && !trimmed.startsWith("$");
-}
-
-/**
- * @param {string} rawValue
- * @param {WebSearchProvider} provider
- */
-export function isProjectSafeCredentialValueForProvider(rawValue, provider) {
-	void provider;
-	return rawValue.trim().length > 0;
-}
-
 /**
  * @param {unknown} value
  * @param {string} path

@@ -338,7 +338,7 @@ function redactBearerCredentials(text: string): string {
 		});
 }
 
-export function isSensitiveFieldName(key: string): boolean {
+function isSensitiveFieldName(key: string): boolean {
 	SENSITIVE_FIELD_NAME_PATTERN.lastIndex = 0;
 	return SENSITIVE_FIELD_NAME_PATTERN.test(key);
 }

@@ -6,7 +6,7 @@ export function getStringRecordField(value: Record<string, unknown>, key: string
 	return typeof field === "string" && field.trim().length > 0 ? field.trim() : undefined;
 }
 
-export function getNetworkRequestUrlPath(url: string | undefined): string | undefined {
+function getNetworkRequestUrlPath(url: string | undefined): string | undefined {
 	if (!url) return undefined;
 	try {
 		return new URL(url).pathname;

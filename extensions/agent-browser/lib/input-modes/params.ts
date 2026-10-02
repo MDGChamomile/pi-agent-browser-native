@@ -79,7 +79,7 @@ export interface AgentBrowserNetworkSourceParams extends AgentBrowserOutputParam
 	sessionMode?: "auto" | "fresh";
 }
 
-export const AGENT_BROWSER_ADVANCED_TOOLS = ["action", "qa", "electron", "source", "network"] as const;
+const AGENT_BROWSER_ADVANCED_TOOLS = ["action", "qa", "electron", "source", "network"] as const;
 export type AgentBrowserAdvancedTool = (typeof AGENT_BROWSER_ADVANCED_TOOLS)[number];
 export interface AgentBrowserToolsParams { enable?: AgentBrowserAdvancedTool[] }
 

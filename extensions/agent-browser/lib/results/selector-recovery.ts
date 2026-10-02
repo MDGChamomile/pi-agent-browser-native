@@ -338,6 +338,6 @@ export function formatRichInputRecoveryText(diagnostic: RichInputRecoveryDiagnos
 	].join("\n");
 }
 
-export function normalizeSemanticActionAccessibleName(name: string): string {
+function normalizeSemanticActionAccessibleName(name: string): string {
 	return name.replace(/\s+/g, " ").trim().toLowerCase();
 }

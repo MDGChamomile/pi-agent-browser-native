@@ -142,10 +142,6 @@ export async function withOwnedManagedSessionContext<T>(
 	return await ownedManagedSessionStorage.run(context, run);
 }
 
-export function getOwnedManagedSessionRestoreKey(): string | undefined {
-	return ownedManagedSessionStorage.getStore()?.restoreKey;
-}
-
 export function resolveOwnedManagedSessionContext(options: {
 	currentManagedSessionName?: string;
 	currentManagedSessionNamespace?: string;
@@ -189,7 +185,7 @@ function closesBrowserSession(args: string[]): boolean {
 	return ["close", "exit", "quit"].includes(parseCommandInfo(args).command ?? "");
 }
 
-export function agentBrowserExplicitConfigIsPresent(
+function agentBrowserExplicitConfigIsPresent(
 	parentEnv: NodeJS.ProcessEnv = getAgentBrowserProcessEnvironment(),
 	args: string[] = [],
 ): boolean {
