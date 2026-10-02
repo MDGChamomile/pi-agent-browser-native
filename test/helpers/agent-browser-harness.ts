@@ -39,6 +39,22 @@ export const DOWNLOAD_FIXTURE_FILENAME = "pi-agent-browser-wait-download-contrac
 const journalFixtures = mkdtempSync(join(tmpdir(), "piab-journal-fixtures-"));
 process.once("exit", () => rmSync(journalFixtures, { recursive: true, force: true }));
 
+// macOS caps Unix socket paths at 103 characters, and realpath-canonicalized CI temp roots can push
+// mkdtemp()-based socket directories past that cap. Host browser sockets in a short private 0700
+// directory (production's own remediation guidance) instead; journal, state, and artifact roots stay
+// wherever the fixture placed them. The literal /tmp prefix must stay unresolved so the path string
+// itself stays short. Windows uses named pipes without a path cap, so it keeps the fixture root.
+export function createShortPrivateSocketDir(fallbackRoot: string): string {
+	if (process.platform !== "win32") {
+		try {
+			return mkdtempSync("/tmp/piab-s-");
+		} catch {
+			// Fall back to the fixture root when /tmp is unusable.
+		}
+	}
+	return join(fallbackRoot, "s");
+}
+
 export interface FixtureServer {
 	baseUrl: string;
 	close: () => Promise<void>;
