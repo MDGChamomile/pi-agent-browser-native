@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { parseUserBatchStdin } from "../extensions/agent-browser/lib/orchestration/batch-stdin.js";
+import { mergeBrowserRunArtifactManifest } from "../extensions/agent-browser/lib/orchestration/browser-run/artifact-merge.js";
 import { buildToolPresentation } from "../extensions/agent-browser/lib/results/presentation.js";
 import type {
 	SessionArtifactManifest,
@@ -623,6 +624,44 @@ test("buildToolPresentation scopes artifact verification to current-result artif
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });
 	}
+});
+
+test("mergeBrowserRunArtifactManifest preserves restart lifecycle order across a concurrent manifest update", () => {
+	const initial = mergeSessionArtifactManifest({
+		entries: [{ command: "screenshot", createdAtMs: 1, kind: "image", path: "initial.png", retentionState: "live", storageScope: "explicit-path" }],
+		nowMs: 1,
+	});
+	assert.ok(initial);
+	const updated = mergeSessionArtifactManifest({
+		base: initial,
+		entries: [
+			{ command: "record", createdAtMs: 2, kind: "video", path: "z-previous.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart-previous" },
+			{ command: "record", createdAtMs: 2, kind: "video", path: "a-current.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart" },
+		],
+		nowMs: 2,
+	});
+	const current = mergeSessionArtifactManifest({
+		base: initial,
+		entries: [{ command: "screenshot", createdAtMs: 3, kind: "image", path: "concurrent.png", retentionState: "live", storageScope: "explicit-path" }],
+		nowMs: 3,
+	});
+	const merged = mergeBrowserRunArtifactManifest(current, initial, updated);
+	assert.equal(merged?.entries.some((entry) => entry.path === "z-previous.webm" && entry.subcommand === "restart-previous"), true);
+	assert.equal(merged?.entries.some((entry) => entry.path === "a-current.webm" && entry.subcommand === "restart"), true);
+	assert.equal(merged?.entries.some((entry) => entry.path === "concurrent.png"), true);
+});
+
+test("mergeSessionArtifactManifest retains the active restart when the recent window is one", { concurrency: false }, async () => {
+	await withPatchedEnv({ PI_AGENT_BROWSER_SESSION_ARTIFACT_MANIFEST_MAX_ENTRIES: "1" }, async () => {
+		const manifest = mergeSessionArtifactManifest({
+			entries: [
+				{ command: "record", createdAtMs: 1, kind: "video", path: "a-previous.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart-previous" },
+				{ command: "record", createdAtMs: 1, kind: "video", path: "z-current.webm", retentionState: "live", session: "shared", storageScope: "explicit-path", subcommand: "restart" },
+			],
+			nowMs: 1,
+		});
+		assert.deepEqual(manifest?.entries.map((entry) => [entry.path, entry.subcommand]), [["z-current.webm", "restart"]]);
+	});
 });
 
 test("artifact manifest defaults to a QA-friendly recent window", () => {

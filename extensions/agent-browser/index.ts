@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -56,6 +55,8 @@ import { getAgentBrowserProcessEnvironment, withAgentBrowserProcessEnvironment, 
 import { withNativeSessionDefaults } from "./lib/orchestration/native-session-defaults.js";
 import { getBrowserCwdError, resolveExecutionCwd } from "./lib/execution-cwd.js";
 import { resolveOperationPaths } from "./lib/orchestration/operation-paths.js";
+import { AsyncExecutionQueue, KeyedAsyncExecutionQueue } from "./lib/orchestration/execution-queue.js";
+import { mergeBrowserRunArtifactManifest } from "./lib/orchestration/browser-run/artifact-merge.js";
 import { closeManagedSession, inspectManagedSessionDaemon } from "./lib/orchestration/browser-run/managed-session-daemon-policy.js";
 import {
 	MINIMUM_AGENT_BROWSER_VERSION,
@@ -95,7 +96,7 @@ import { appendScriptSessionLease, createBrowserCodeOutput, getScriptSessionLeas
 import { resolveBrowserExecutionIdentity, withBrowserExecutionLock, withBrowserExecutionLocks } from "./lib/managed-session-policy-lock.js";
 import { AGENT_BROWSER_INSTRUCTION_GROUP, AGENT_BROWSER_TOOL_INVENTORY, registerAgentBrowserToolSurface, type AgentBrowserExecutor, type AgentBrowserCodeExecutor } from "./lib/tool-surface.js";
 import type { AgentBrowserFailureCategory, FileArtifactMetadata, NetworkRouteRecord, SessionArtifactManifest } from "./lib/results/contracts.js";
-import { formatSessionArtifactRetentionSummary, getSessionArtifactManifestEntryKey, isPendingRecordingCommand, isSessionArtifactManifest, mergeSessionArtifactManifest, retirePendingRecordingManifestEntries } from "./lib/results/artifact-manifest.js";
+import { formatSessionArtifactRetentionSummary, getSessionArtifactManifestEntryKey, isSessionArtifactManifest, retirePendingRecordingManifestEntries } from "./lib/results/artifact-manifest.js";
 import { appendUniqueAgentBrowserNextActions, applyNamespaceToNextActions, applySessionToNextActions, buildNextToolAction, type AgentBrowserNextAction } from "./lib/results/next-actions.js";
 import { canRegisterWebSearchTool, loadAgentBrowserConfigSync } from "./lib/config.js";
 import {
@@ -779,83 +780,6 @@ function shouldSerializeBrowserCommand(options: {
 	return getActiveElectronRecords(options.ownedElectronLaunchRecords).some((record) => record.sessionName === options.explicitSessionName);
 }
 
-// Serializes managed-session read/modify/write work so overlapping tool calls cannot promote stale state or close an in-use session.
-class AsyncExecutionQueue {
-	private tail: Promise<void> = Promise.resolve();
-	private readonly active = new AsyncLocalStorage<{ active: boolean }>();
-
-	isCurrent(): boolean { return this.active.getStore()?.active === true; }
-
-	run<T>(work: () => Promise<T>, signal?: AbortSignal, barrier = Promise.resolve()): Promise<T> {
-		if (this.isCurrent()) { signal?.throwIfAborted(); return work(); }
-		const previous = this.tail;
-		let release!: () => void;
-		this.tail = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-
-		let rejectWaiting!: (reason: unknown) => void;
-		const cancelled = new Promise<never>((_resolve, reject) => { rejectWaiting = reject; });
-		const abortWaiting = () => rejectWaiting(signal?.reason);
-		signal?.addEventListener("abort", abortWaiting, { once: true });
-		if (signal?.aborted) abortWaiting();
-		const execution = (async () => {
-			await Promise.all([previous, barrier]);
-			signal?.removeEventListener("abort", abortWaiting);
-			try {
-				signal?.throwIfAborted();
-				const scope = { active: true };
-				try { return await this.active.run(scope, work); }
-				finally { scope.active = false; }
-			} finally {
-				release();
-			}
-		})();
-		return signal ? Promise.race([execution, cancelled]) : execution;
-	}
-}
-
-export class KeyedAsyncExecutionQueue {
-	private readonly barriers = new Map<string, Promise<void>>();
-	private readonly entries = new Map<string, { queue: AsyncExecutionQueue; users: number }>();
-
-	async run<T>(key: string, namespace: string | undefined, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-		const entry = this.entries.get(key) ?? { queue: new AsyncExecutionQueue(), users: 0 };
-		if (entry.queue.isCurrent()) return work();
-		const barrier = this.barriers.get(getAgentBrowserSessionIdentityKey("", namespace)) ?? Promise.resolve();
-		entry.users += 1;
-		this.entries.set(key, entry);
-		try {
-			return await entry.queue.run(work, signal, barrier);
-		} finally {
-			entry.users -= 1;
-			if (entry.users === 0 && this.entries.get(key) === entry) this.entries.delete(key);
-		}
-	}
-
-	async runExclusive<T>(namespace: string | undefined, work: () => Promise<T>): Promise<T> {
-		const namespaceKey = getAgentBrowserSessionIdentityKey("", namespace);
-		const previous = this.barriers.get(namespaceKey) ?? Promise.resolve();
-		let release!: () => void;
-		const blocked = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const barrier = previous.then(() => blocked);
-		this.barriers.set(namespaceKey, barrier);
-		const drains = [...this.entries]
-			.filter(([key]) => isAgentBrowserSessionIdentityKeyInNamespace(key, namespace))
-			.map(([, { queue }]) => queue.run(async () => undefined));
-		await previous;
-		await Promise.all(drains);
-		try {
-			return await work();
-		} finally {
-			release();
-			if (this.barriers.get(namespaceKey) === barrier) this.barriers.delete(namespaceKey);
-		}
-	}
-}
-
 function mergeBrowserRunMap<K, V>(current: Map<K, V>, initial: Map<K, V>, updated: Map<K, V>): Map<K, V> {
 	if (updated === initial) return current;
 	const merged = new Map(current);
@@ -866,30 +790,6 @@ function mergeBrowserRunMap<K, V>(current: Map<K, V>, initial: Map<K, V>, update
 		if (!updated.has(key)) merged.delete(key);
 	}
 	return merged;
-}
-
-export function mergeBrowserRunArtifactManifest(
-	current: SessionArtifactManifest | undefined,
-	initial: SessionArtifactManifest | undefined,
-	updated: SessionArtifactManifest | undefined,
-): SessionArtifactManifest | undefined {
-	if (!updated || updated === initial) return current;
-	if (current === initial) return updated;
-	const initialEntries = new Map((initial?.entries ?? []).map((entry) => [getSessionArtifactManifestEntryKey(entry), entry]));
-	const changedEntries = updated.entries
-		.map((entry, index) => ({ entry, index }))
-		.filter(({ entry }) => initialEntries.get(getSessionArtifactManifestEntryKey(entry)) !== entry)
-		.sort((left, right) => left.entry.createdAtMs - right.entry.createdAtMs
-			|| Number(isPendingRecordingCommand(left.entry.command, left.entry.subcommand, left.entry.kind)) - Number(isPendingRecordingCommand(right.entry.command, right.entry.subcommand, right.entry.kind))
-			|| left.index - right.index)
-		.map(({ entry }) => entry);
-	return changedEntries.length === 0
-		? current
-		: mergeSessionArtifactManifest({
-			base: current,
-			entries: changedEntries,
-			nowMs: Math.max(Date.now(), (current?.updatedAtMs ?? 0) + 1, updated.updatedAtMs),
-		});
 }
 
 function findPackageRoot(startDir: string): string {

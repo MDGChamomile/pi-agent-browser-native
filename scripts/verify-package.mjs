@@ -437,8 +437,13 @@ export function evaluatePackResult(options) {
 	const { forbiddenRepoFiles, missingRepoFiles, packResult, publishContract } = options;
 	const packedPaths = collectPackedPaths(Array.isArray(packResult.files) ? packResult.files : []);
 	const missingPackedFiles = publishContract.requiredPackedFiles.filter((path) => !packedPaths.has(path));
-	const forbiddenPackedFiles = publishContract.forbiddenPackedFiles.filter((path) =>
-		path.endsWith("/") ? [...packedPaths].some((packedPath) => packedPath.startsWith(path)) : packedPaths.has(path),
+	// ponytail: Only the two canonical leak patterns are supported; add explicit rules if the publish contract grows.
+	const forbiddenPackedFiles = publishContract.forbiddenPackedFiles.filter((pattern) =>
+		[...packedPaths].some((path) =>
+			(pattern.endsWith("/") && path.startsWith(pattern))
+			|| (pattern === ".env*" && path.startsWith(".env"))
+			|| (pattern === "**/*.tgz" && path.endsWith(".tgz"))
+			|| path === pattern),
 	);
 	const failures = collectVerificationFailures({
 		forbiddenPackedFiles,

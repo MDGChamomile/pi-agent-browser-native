@@ -203,29 +203,3 @@ try {
 	const result = run(process.execPath, ["--input-type=module", "-e", code]);
 	assert.equal(result.status, 0, result.stderr + result.stdout);
 });
-
-test("npm pack includes platform smoke docs and scripts", () => {
-	const result = run("npm", ["pack", "--dry-run", "--json"]);
-	assert.equal(result.status, 0, result.stderr);
-	const output = JSON.parse(result.stdout) as Array<{ files: Array<{ path: string }> }> | Record<string, { files: Array<{ path: string }> }>;
-	const pack = Array.isArray(output) ? output[0] : Object.values(output)[0];
-	const paths = new Set(pack?.files.map((file) => file.path) ?? []);
-	for (const path of [
-		"docs/platform-smoke.md",
-		"platform-smoke.config.mjs",
-		"scripts/platform-smoke.mjs",
-		"scripts/platform-smoke/artifacts.mjs",
-		"scripts/platform-smoke/crabbox-runner.mjs",
-		"scripts/platform-smoke/doctor.mjs",
-		"scripts/platform-smoke/targets.mjs",
-		"scripts/platform-smoke/platform-build-windows.ps1",
-		"scripts/platform-smoke/browser-dogfood-windows.ps1",
-		"scripts/platform-smoke/linux-image/Dockerfile",
-	]) {
-		assert.ok(paths.has(path), `expected npm pack to include ${path}`);
-	}
-	for (const forbidden of [".artifacts/", ".crabbox/", ".debug/", ".platform-smoke-runs/", ".env", ".env."]) {
-		assert.equal([...paths].some((path) => path === forbidden || path.startsWith(forbidden)), false);
-	}
-	assert.equal([...paths].some((path) => path.endsWith(".tgz")), false);
-});

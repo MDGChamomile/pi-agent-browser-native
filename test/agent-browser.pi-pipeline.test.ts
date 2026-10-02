@@ -1,5 +1,5 @@
 /**
- * Purpose: Prove Pi applies the agent_browser tool_result patch through the real AgentSession pipeline.
+ * Purpose: Verify browser failure finalization and returned results through the real Pi AgentSession pipeline.
  * Responsibilities: Use a model-free SDK session with a deterministic fake provider and fake upstream agent-browser binary, then inspect persisted tool results.
  * Scope: Pi integration coverage for extension event semantics that direct tool.execute() tests intentionally bypass.
  */
@@ -34,12 +34,22 @@ import {
 import * as Pi from "@earendil-works/pi-coding-agent";
 
 import agentBrowserExtension from "../extensions/agent-browser/index.js";
+import { finalizeAgentBrowserFailure } from "../extensions/agent-browser/lib/pi-tool-rendering.js";
 import { PROJECT_RULE_PROMPT, RUNTIME_PROMPT_GUIDELINES, SHARED_BROWSER_PLAYBOOK_GUIDELINES, ADVANCED_TOOL_PROMPT_GUIDELINES } from "../extensions/agent-browser/lib/playbook.js";
 import {
 	readInvocationLog,
 	withPatchedEnv,
 	writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
+
+test("failure finalization adds the Pi failure notice to prose despite --json args", () => {
+	const proseJsonArgsFinalized = finalizeAgentBrowserFailure(
+		{ content: [{ type: "text", text: "Wrapper validation failed before upstream JSON output was available." }], details: { args: ["--json", "get", "url"], failureCategory: "validation-error", resultCategory: "failure" }, isError: false },
+		{ args: ["--json", "get", "url"] },
+	);
+	assert.equal(proseJsonArgsFinalized.isError, true);
+	assert.match((proseJsonArgsFinalized.content[0] as { text: string }).text, /Result category: failure; failureCategory: validation-error; Pi tool isError: true\./);
+});
 
 const PIPELINE_PROVIDER = "piab-pipeline";
 const PIPELINE_MODEL_ID = "tool-pipeline";

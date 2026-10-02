@@ -1,7 +1,7 @@
 /**
- * Purpose: Verify high-level agent_browser input-mode compilation at the extension entrypoint.
- * Responsibilities: Assert semanticAction, visible-ref semantic resolution, constrained job, and lightweight QA compile/result contracts.
- * Scope: Integration-style Node test-runner coverage split out of the broad extension-validation suite; source/network lookup and validation-error tails remain in their focused suites.
+ * Purpose: Verify common input validation and high-level compilation at the extension entrypoint.
+ * Responsibilities: Assert mode exclusivity, lookup shapes/stdin, semanticAction, visible-ref semantic resolution, native batch, and lightweight QA contracts.
+ * Scope: Integration-style Node test-runner coverage; source/network lookup execution and semantic recovery retain focused owners.
  * Usage: Run with `npx tsx --test test/agent-browser.extension-input-modes.test.ts` or via `npm run verify`.
  * Invariants/Assumptions: Tests use fake agent-browser binaries and isolated env/temp directories to avoid relying on upstream browser behavior.
  */
@@ -15,7 +15,6 @@ import test from "node:test";
 import { Check } from "typebox/value";
 
 import { analyzeQaPresetResults, analyzeQaPresetTimeout, compileAgentBrowserQaPreset } from "../extensions/agent-browser/lib/input-modes/job.js";
-import { finalizeAgentBrowserFailure } from "../extensions/agent-browser/lib/pi-tool-rendering.js";
 import { compileAgentBrowserSemanticAction } from "../extensions/agent-browser/lib/input-modes/semantic-action.js";
 import {
 	createExtensionHarness,
@@ -24,7 +23,52 @@ import {
 	runExtensionEvent,
 	withPatchedEnv,
 	writeFakeAgentBrowserBinary,
+	type AgentBrowserToolParams,
 } from "./helpers/agent-browser-harness.js";
+
+test("agentBrowserExtension rejects invalid lookup shapes, mixed input modes, and caller stdin before dispatch", { concurrency: false }, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-input-modes-invalid-"));
+	const logPath = join(tempDir, "invocations.log");
+	const basePath = process.env.PATH ?? "";
+	await writeFakeAgentBrowserBinary(tempDir, `const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args: process.argv.slice(2) }) + "\\n");
+process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));`);
+	try {
+		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
+			const harness = createExtensionHarness({ cwd: tempDir });
+			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
+			const exclusiveModeMessage = /Provide exactly one of args, semanticAction, qa, sourceLookup, networkSourceLookup, or electron/;
+			const lookupStdinMessage = /Do not provide stdin with qa, sourceLookup, or networkSourceLookup/;
+			const cases: Array<{ label: string; params: AgentBrowserToolParams; message: RegExp; excludedMessage?: RegExp }> = [
+				{ label: "args with semanticAction", params: { args: ["click", "@e1"], semanticAction: { action: "click", locator: "text", value: "Export" } }, message: exclusiveModeMessage },
+				{ label: "empty sourceLookup", params: { sourceLookup: {} }, message: /sourceLookup requires selector, reactFiberId, or componentName/ },
+				{ label: "oversized sourceLookup", params: { sourceLookup: { componentName: "Panel", maxWorkspaceFiles: 5001 } }, message: /maxWorkspaceFiles must be 5000 or less/ },
+				{ label: "sourceLookup with args", params: { args: ["react", "tree"], sourceLookup: { componentName: "Panel" } }, message: exclusiveModeMessage },
+				{ label: "sourceLookup with stdin", params: { sourceLookup: { componentName: "Panel" }, stdin: "[]" }, message: lookupStdinMessage },
+				{ label: "networkSourceLookup with args", params: { args: ["network", "requests"], networkSourceLookup: { url: "/api/fail" } }, message: exclusiveModeMessage },
+				{ label: "networkSourceLookup with stdin", params: { networkSourceLookup: { url: "/api/fail" }, stdin: "[]" }, message: lookupStdinMessage },
+				{ label: "empty networkSourceLookup", params: { networkSourceLookup: {} }, message: /networkSourceLookup requires requestId, filter, or url/ },
+				{ label: "electron with args", params: { args: ["open", "https://example.test/"], electron: { action: "list" } }, message: exclusiveModeMessage },
+				{ label: "electron with semanticAction", params: { semanticAction: { action: "click", locator: "text", value: "Export" }, electron: { action: "list" } }, message: exclusiveModeMessage },
+				{ label: "electron with qa", params: { qa: { url: "https://example.test/" }, electron: { action: "list" } }, message: exclusiveModeMessage },
+				{ label: "electron with sourceLookup", params: { sourceLookup: { componentName: "Panel" }, electron: { action: "list" } }, message: exclusiveModeMessage },
+				{ label: "electron with networkSourceLookup", params: { networkSourceLookup: { url: "/api" }, electron: { action: "list" } }, message: exclusiveModeMessage },
+				{ label: "electron with stdin", params: { electron: { action: "list" }, stdin: "[]" }, message: /Do not provide stdin with electron; electron mode is host-only or manages its own input\./, excludedMessage: /job, qa, sourceLookup, or networkSourceLookup/ },
+			];
+			for (const { label, params, message, excludedMessage } of cases) {
+				const result = await executeRegisteredTool(harness.tool, harness.ctx, params);
+				assert.equal(result.isError, true, label);
+				assert.match(result.content[0]?.text ?? "", message, label);
+				if (excludedMessage) assert.doesNotMatch(result.content[0]?.text ?? "", excludedMessage, label);
+				assert.equal(result.details?.resultCategory, "failure", label);
+				assert.equal(result.details?.failureCategory, "validation-error", label);
+				assert.deepEqual(await readInvocationLog(logPath), [], `${label}: upstream must not dispatch`);
+			}
+		});
+	} finally {
+		await rm(tempDir, { force: true, recursive: true });
+	}
+});
 
 test("semanticAction treats an empty generated role name as omitted", () => {
 	assert.deepEqual(
@@ -1019,13 +1063,6 @@ process.stdin.on("end", () => {
 			assert.equal(result.isError, true);
 			assert.equal(result.details?.failureCategory, "qa-failure");
 			assert.match(result.content[0]?.text ?? "", /Result category: failure; failureCategory: qa-failure; Pi tool isError: true\./);
-
-			const proseJsonArgsFinalized = finalizeAgentBrowserFailure(
-				{ content: [{ type: "text", text: "Wrapper validation failed before upstream JSON output was available." }], details: { args: ["--json", "get", "url"], failureCategory: "validation-error", resultCategory: "failure" }, isError: false },
-				{ args: ["--json", "get", "url"] },
-			);
-			assert.equal(proseJsonArgsFinalized.isError, true);
-			assert.match((proseJsonArgsFinalized.content[0] as { text: string }).text, /Result category: failure; failureCategory: validation-error; Pi tool isError: true\./);
 
 			const managedSessionOutcome = result.details?.managedSessionOutcome as { sessionMode?: string; status?: string; succeeded?: boolean } | undefined;
 			assert.equal(managedSessionOutcome?.sessionMode, "fresh");

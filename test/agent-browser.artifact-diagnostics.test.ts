@@ -25,7 +25,7 @@ const jpeg = Buffer.from("/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAY
 const pageUrl = "https://artifact.example.test/current";
 
 async function withFixture(run: (root: string, harness: ReturnType<typeof createExtensionHarness>, log: string) => Promise<void>): Promise<void> {
-	const root = await mkdtemp(join(tmpdir(), "ad-"));
+	const root = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "ad-"));
 	const log = join(root, "calls.jsonl");
 	await writeFakeAgentBrowserBinary(root, `const fs = require('node:fs'), path = require('node:path');
 const args = process.argv.slice(2), stdin = fs.readFileSync(0, 'utf8'), tokens = [];

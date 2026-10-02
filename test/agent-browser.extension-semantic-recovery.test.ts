@@ -22,7 +22,7 @@ import {
 	writeFakeAgentBrowserBinary,
 } from "./helpers/agent-browser-harness.js";
 
-test("agentBrowserExtension rejects ambiguous or incomplete semantic actions before spawning agent-browser", { concurrency: false }, async () => {
+test("agentBrowserExtension rejects incomplete semantic actions before spawning agent-browser", { concurrency: false }, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-agent-browser-semantic-action-invalid-"));
 	const logPath = join(tempDir, "invocations.log");
 	const basePath = process.env.PATH ?? "";
@@ -37,61 +37,6 @@ process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));
 		await withPatchedEnv({ PATH: `${tempDir}:${basePath}` }, async () => {
 			const harness = createExtensionHarness({ cwd: tempDir });
 			await runExtensionEvent(harness.handlers, "session_start", { reason: "new" }, harness.ctx);
-
-			const ambiguous = await executeRegisteredTool(harness.tool, harness.ctx, {
-				args: ["click", "@e1"],
-				semanticAction: { action: "click", locator: "text", value: "Export" },
-			});
-			assert.equal(ambiguous.isError, true);
-			assert.match((ambiguous.content[0] as { text: string }).text, /Provide exactly one of args, semanticAction, qa, sourceLookup, networkSourceLookup, or electron/);
-			assert.equal(ambiguous.details?.resultCategory, "failure");
-			assert.equal(ambiguous.details?.failureCategory, "validation-error");
-
-			const invalidSourceLookup = await executeRegisteredTool(harness.tool, harness.ctx, {
-				sourceLookup: {},
-			});
-			assert.equal(invalidSourceLookup.isError, true);
-			assert.match((invalidSourceLookup.content[0] as { text: string }).text, /sourceLookup requires selector, reactFiberId, or componentName/);
-
-			const oversizedSourceLookup = await executeRegisteredTool(harness.tool, harness.ctx, {
-				sourceLookup: { componentName: "Panel", maxWorkspaceFiles: 5001 },
-			});
-			assert.equal(oversizedSourceLookup.isError, true);
-			assert.match((oversizedSourceLookup.content[0] as { text: string }).text, /maxWorkspaceFiles must be 5000 or less/);
-
-			const sourceLookupWithArgs = await executeRegisteredTool(harness.tool, harness.ctx, {
-				args: ["react", "tree"],
-				sourceLookup: { componentName: "Panel" },
-			});
-			assert.equal(sourceLookupWithArgs.isError, true);
-			assert.match((sourceLookupWithArgs.content[0] as { text: string }).text, /Provide exactly one of args, semanticAction, qa, sourceLookup, networkSourceLookup, or electron/);
-
-			const sourceLookupWithStdin = await executeRegisteredTool(harness.tool, harness.ctx, {
-				sourceLookup: { componentName: "Panel" },
-				stdin: "[]",
-			});
-			assert.equal(sourceLookupWithStdin.isError, true);
-			assert.match((sourceLookupWithStdin.content[0] as { text: string }).text, /Do not provide stdin with qa, sourceLookup, or networkSourceLookup/);
-
-			const networkSourceLookupWithArgs = await executeRegisteredTool(harness.tool, harness.ctx, {
-				args: ["network", "requests"],
-				networkSourceLookup: { url: "/api/fail" },
-			});
-			assert.equal(networkSourceLookupWithArgs.isError, true);
-			assert.match((networkSourceLookupWithArgs.content[0] as { text: string }).text, /Provide exactly one of args, semanticAction, qa, sourceLookup, networkSourceLookup, or electron/);
-
-			const networkSourceLookupWithStdin = await executeRegisteredTool(harness.tool, harness.ctx, {
-				networkSourceLookup: { url: "/api/fail" },
-				stdin: "[]",
-			});
-			assert.equal(networkSourceLookupWithStdin.isError, true);
-			assert.match((networkSourceLookupWithStdin.content[0] as { text: string }).text, /Do not provide stdin with qa, sourceLookup, or networkSourceLookup/);
-
-			const emptyNetworkSourceLookup = await executeRegisteredTool(harness.tool, harness.ctx, {
-				networkSourceLookup: {},
-			});
-			assert.equal(emptyNetworkSourceLookup.isError, true);
-			assert.match((emptyNetworkSourceLookup.content[0] as { text: string }).text, /networkSourceLookup requires requestId, filter, or url/);
 
 			const missingText = await executeRegisteredTool(harness.tool, harness.ctx, {
 				semanticAction: { action: "fill", locator: "label", value: "Email" },
@@ -150,7 +95,7 @@ process.stdout.write(JSON.stringify({ success: true, data: "should not run" }));
 			assert.equal(selectWithLocator.details?.failureCategory, "validation-error");
 
 			const invocations = await readInvocationLog(logPath).catch(() => []);
-			assert.deepEqual(invocations.filter((entry) => entry.args.includes("find")), []);
+			assert.deepEqual(invocations, []);
 		});
 	} finally {
 		await rm(tempDir, { force: true, recursive: true });

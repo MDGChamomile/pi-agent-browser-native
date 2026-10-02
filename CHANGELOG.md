@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Move retained regressions to focused queue, artifact, input-validation, Electron host/branch, and Pi-pipeline owners. Relocate queue and concurrent artifact-merge helpers out of the extension entrypoint without changing their behavior. Consolidate required platform paths and private-file/tarball leak checks into the canonical package verifier and its existing real-tarball test. Allocate the macOS artifact alias fixture under `/tmp` so its path-alias contract does not depend on `TMPDIR`.
 - Consolidate duplicate test invocations into their owning tables and delivery boundaries, preserving distinct lifecycle, redaction, recovery, and native activation checks. Split recording dependency, reservation, and batch-lifecycle assertions into named contracts. Test-only; no production behavior changed.
 - Repaired 23 weak test assertions found by the test audit: literal prompt-byte expectations instead of source-derived constants, per-fixture bound expectations replacing pass-for-every-row alternations, real execution and credential-laziness probes for web-search/config, exact root-session `get url` probe matrices in passthrough coverage, complete guarded-set and key-set assertions, and anchored literal launcher/argv-delivery checks. Test-only; no production behavior changed.
 
