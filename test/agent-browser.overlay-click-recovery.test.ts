@@ -44,8 +44,11 @@ test("covered-click inspection follows the actual direct, semantic, and raw find
 		commandInfo: { command: "find", subcommand: "text" }, compiledSemanticAction: compiled,
 		cwd: process.cwd(), errorText, sessionName: "work",
 	});
+	assert.equal(semantic.resultCategory, "failure");
 	assert.equal(semantic.failureCategory, "upstream-error");
-	assert.deepEqual(semantic.nextActions?.[0]?.params?.args, ["--session", "work", "snapshot", "-i"]);
+	assert.deepEqual(semantic.nextActions?.map(({ id, params }) => ({ id, params })), [{
+		id: "inspect-overlay-state", params: { args: ["--session", "work", "snapshot", "-i"] },
+	}]);
 });
 
 test("covered-click data error envelopes reach presentation without losing the upstream error", () => {

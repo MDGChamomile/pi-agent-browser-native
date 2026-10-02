@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Consolidate duplicate test invocations into their owning tables and delivery boundaries, preserving distinct lifecycle, redaction, recovery, and native activation checks. Split recording dependency, reservation, and batch-lifecycle assertions into named contracts. Test-only; no production behavior changed.
 - Repaired 23 weak test assertions found by the test audit: literal prompt-byte expectations instead of source-derived constants, per-fixture bound expectations replacing pass-for-every-row alternations, real execution and credential-laziness probes for web-search/config, exact root-session `get url` probe matrices in passthrough coverage, complete guarded-set and key-set assertions, and anchored literal launcher/argv-delivery checks. Test-only; no production behavior changed.
 
 ### Fixed

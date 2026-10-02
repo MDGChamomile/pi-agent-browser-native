@@ -402,11 +402,13 @@ for (const command of [["network", "requests", "--current-url"], ["read", "--fil
 
 for (const options of [{ explicit: true }, { attached: true }, { restoreDisabled: true }]) {
 	test(`cold boundary does not navigate outside automatic restore: ${JSON.stringify(options)}`, { concurrency: false }, async () => {
-		await withPage(async (page) => {
-			await page.call({ args: ["tab", "list"] });
-			await page.call({ args: ["snapshot", "-i"] });
-			assert.equal((await page.calls()).some((row) => extractUpstreamCommandTokens(row.args)[0] === "open"), false);
-		}, options);
+		for (const inspectFirst of [false, true]) {
+			await withPage(async (page) => {
+				if (inspectFirst) await page.call({ args: ["tab", "list"] });
+				await page.call({ args: ["snapshot", "-i"] });
+				assert.equal((await page.calls()).some((row) => extractUpstreamCommandTokens(row.args)[0] === "open"), false);
+			}, options);
+		}
 	});
 }
 

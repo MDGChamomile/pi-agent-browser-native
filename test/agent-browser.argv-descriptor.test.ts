@@ -28,6 +28,8 @@ test("parseCommandInfo recognizes representative current command families", () =
 		{ args: ["stream", "enable", "--port", "7777"], expected: { command: "stream", subcommand: "enable" } },
 		{ args: ["webmcp", "invoke", "search", "--params", "{}", "--frame", "main"], expected: { command: "webmcp", subcommand: "invoke" } },
 		{ args: ["tab", "new", "--label", "Docs", "https://example.com"], expected: { command: "tab", subcommand: "new" } },
+		{ args: ["--session", "named", "--profile", "./profile", "tab", "list"], expected: { command: "tab", subcommand: "list" } },
+		{ args: ["--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36", "--args", "--disable-gpu,--lang=en-US", "open", "https://example.com"], expected: { command: "open", subcommand: "https://example.com" } },
 	] as const) {
 		assert.deepEqual(parseCommandInfo([...args]), expected);
 	}

@@ -183,56 +183,27 @@ test("doctor passes the source check when exactly one configured source is activ
 	assert.match(text, /Detected source: npm:pi-agent-browser-native/);
 });
 
-test("doctor resolves relative package sources from their settings file directory", async () => {
-	const settingsByPath = new Map([[resolve("/home/user/.pi/agent/settings.json"), JSON.stringify({ packages: ["../../Projects/AI/pi-agent-browser"] })]]);
-	const report = await evaluateDoctorWithPi({
-		agentDir: "/home/user/.pi/agent",
-		cwd: "/home/user/Projects/AI/pi-agent-browser",
-		pathExists: async (path) => settingsByPath.has(path),
-		readText: async (path) => settingsByPath.get(path),
-		runAgentBrowser: async () => passingVersion(),
-	});
-	const text = formatDoctorReport(report);
+test("doctor resolves relative sources from their settings file directory", async () => {
+	// The compiled `dist/` entrypoint row protects packaged installs whose configured source points at build output.
+	for (const [settingsKey, source] of [
+		["packages", "../../Projects/AI/pi-agent-browser"],
+		["extensions", "../../Projects/AI/pi-agent-browser/extensions/agent-browser/index.ts"],
+		["extensions", "../../Projects/AI/pi-agent-browser/dist/extensions/agent-browser/index.js"],
+	] as const) {
+		const settingsByPath = new Map([[resolve("/home/user/.pi/agent/settings.json"), JSON.stringify({ [settingsKey]: [source] })]]);
+		const report = await evaluateDoctorWithPi({
+			agentDir: "/home/user/.pi/agent",
+			cwd: "/home/user/Projects/AI/pi-agent-browser",
+			pathExists: async (path) => settingsByPath.has(path),
+			readText: async (path) => settingsByPath.get(path),
+			runAgentBrowser: async () => passingVersion(),
+		});
+		const text = formatDoctorReport(report);
 
-	assert.equal(report.failures.length, 0);
-	assert.match(text, /No duplicate pi-agent-browser-native sources detected/);
-	assert.match(text, /Detected source: ..\/..\/Projects\/AI\/pi-agent-browser/);
-});
-
-test("doctor resolves relative extension sources from their settings file directory", async () => {
-	const settingsByPath = new Map([
-		[resolve("/home/user/.pi/agent/settings.json"), JSON.stringify({ extensions: ["../../Projects/AI/pi-agent-browser/extensions/agent-browser/index.ts"] })],
-	]);
-	const report = await evaluateDoctorWithPi({
-		agentDir: "/home/user/.pi/agent",
-		cwd: "/home/user/Projects/AI/pi-agent-browser",
-		pathExists: async (path) => settingsByPath.has(path),
-		readText: async (path) => settingsByPath.get(path),
-		runAgentBrowser: async () => passingVersion(),
-	});
-	const text = formatDoctorReport(report);
-
-	assert.equal(report.failures.length, 0);
-	assert.match(text, /No duplicate pi-agent-browser-native sources detected/);
-	assert.match(text, /Detected source: ..\/..\/Projects\/AI\/pi-agent-browser\/extensions\/agent-browser\/index\.ts/);
-});
-
-test("doctor recognizes compiled extension entrypoint sources", async () => {
-	const settingsByPath = new Map([
-		[resolve("/home/user/.pi/agent/settings.json"), JSON.stringify({ extensions: ["../../Projects/AI/pi-agent-browser/dist/extensions/agent-browser/index.js"] })],
-	]);
-	const report = await evaluateDoctorWithPi({
-		agentDir: "/home/user/.pi/agent",
-		cwd: "/home/user/Projects/AI/pi-agent-browser",
-		pathExists: async (path) => settingsByPath.has(path),
-		readText: async (path) => settingsByPath.get(path),
-		runAgentBrowser: async () => passingVersion(),
-	});
-	const text = formatDoctorReport(report);
-
-	assert.equal(report.failures.length, 0);
-	assert.match(text, /No duplicate pi-agent-browser-native sources detected/);
-	assert.match(text, /Detected source: ..\/..\/Projects\/AI\/pi-agent-browser\/dist\/extensions\/agent-browser\/index\.js/);
+		assert.equal(report.failures.length, 0);
+		assert.match(text, /No duplicate pi-agent-browser-native sources detected/);
+		assert.ok(text.includes(`Detected source: ${source}`), source);
+	}
 });
 
 test("doctor treats no configured source as an informational warning, not a failure", async () => {

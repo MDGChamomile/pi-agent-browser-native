@@ -144,17 +144,28 @@ test("native Pi registration keeps advanced tools discoverable and activation ad
 });
 
 test("native defaultTools survives startup and initial resume restoration is additive", async () => {
-	const manager = SessionManager.inMemory();
-	manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [
-		{ name: "agent_browser_action", description: "Action", parameters: AGENT_BROWSER_ACTION_PARAMS },
-	] });
-	for (const sessionManager of [undefined, manager]) {
+	const managerWithRestored = (tool: "action" | "qa"): SessionManager => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [
+			tool === "action"
+				? { name: "agent_browser_action", description: "Action", parameters: AGENT_BROWSER_ACTION_PARAMS }
+				: { name: "agent_browser_qa", description: "QA", parameters: AGENT_BROWSER_QA_PARAMS },
+		] });
+		return manager;
+	};
+	const cases: Array<{ label: string; options: { defaultTools?: string[]; sessionManager?: SessionManager }; restoredTool?: string }> = [
+		{ label: "default tools with a transcript-restored action", options: { defaultTools: ["agent_browser", "agent_browser_qa"], sessionManager: managerWithRestored("action") }, restoredTool: "agent_browser_action" },
+		{ label: "default tools without restoration", options: { defaultTools: ["agent_browser", "agent_browser_qa"] } },
+		{ label: "transcript-restored qa without default tools", options: { sessionManager: managerWithRestored("qa") }, restoredTool: "agent_browser_qa" },
+		{ label: "plain registration without default tools or restoration", options: {} },
+	];
+	for (const { label, options, restoredTool } of cases) {
 		await withSurface(async ({ active, reload }) => {
-			const expected = [...baseTools, "agent_browser_qa", ...(sessionManager ? ["agent_browser_action"] : [])].sort();
-			assert.deepEqual(active().sort(), expected);
+			const expected = [...baseTools, ...(options.defaultTools ? ["agent_browser_qa"] : []), ...(restoredTool ? [restoredTool] : [])].sort();
+			assert.deepEqual(active().sort(), expected, label);
 			await reload();
-			assert.deepEqual(active().sort(), expected);
-		}, { defaultTools: ["agent_browser", "agent_browser_qa"], sessionManager });
+			assert.deepEqual(active().sort(), expected, label);
+		}, options);
 	}
 });
 
@@ -235,19 +246,6 @@ test("startup preserves native transcript activation and honors native removals"
 		assert.deepEqual(active().sort(), [...baseTools, "agent_browser_qa"].sort());
 	}, { sessionManager: manager });
 });
-
-for (const restoredQa of [false, true]) {
-	test(`native reload preserves compact activation (restored QA: ${restoredQa})`, async () => {
-		const manager = SessionManager.inMemory();
-		if (restoredQa) manager.appendMessage({ role: "system", content: "", timestamp: 1, toolsAdded: [{ name: "agent_browser_qa", description: "QA", parameters: AGENT_BROWSER_QA_PARAMS }] });
-		await withSurface(async ({ active, reload }) => {
-			const expected = [...baseTools, ...(restoredQa ? ["agent_browser_qa"] : [])].sort();
-			assert.deepEqual(active().sort(), expected);
-			await reload();
-			assert.deepEqual(active().sort(), expected);
-		}, { sessionManager: manager });
-	});
-}
 
 test("explicit native CLI tool selection stays active and the loader cannot override unavailable tools", async () => {
 	const original = process.argv;

@@ -1020,16 +1020,6 @@ process.stdin.on("end", () => {
 			assert.equal(result.details?.failureCategory, "qa-failure");
 			assert.match(result.content[0]?.text ?? "", /Result category: failure; failureCategory: qa-failure; Pi tool isError: true\./);
 
-			const jsonFailureText = JSON.stringify({ error: "boom", success: false }, null, 2);
-			const jsonFinalized = finalizeAgentBrowserFailure(
-				{ content: [{ type: "text", text: jsonFailureText }], details: { args: ["--json", "get", "url"], failureCategory: "upstream-error", resultCategory: "failure" }, isError: false },
-				{ args: ["--json", "get", "url"] },
-			);
-			assert.equal(jsonFinalized.isError, true);
-			assert.equal(jsonFinalized.content[0]?.type, "text");
-			assert.equal((jsonFinalized.content[0] as { text: string }).text, jsonFailureText);
-			assert.deepEqual(JSON.parse(jsonFailureText), { error: "boom", success: false });
-
 			const proseJsonArgsFinalized = finalizeAgentBrowserFailure(
 				{ content: [{ type: "text", text: "Wrapper validation failed before upstream JSON output was available." }], details: { args: ["--json", "get", "url"], failureCategory: "validation-error", resultCategory: "failure" }, isError: false },
 				{ args: ["--json", "get", "url"] },

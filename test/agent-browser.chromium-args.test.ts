@@ -55,8 +55,6 @@ for (const [label, step] of [
 	["leading command", ["--no-sandbox", "open", url]],
 	["navigation tail", ["open", url, "--no-sandbox"]],
 	["URL-less open", ["open", "--no-sandbox"]],
-	["goto option", ["goto", "--no-sandbox", url]],
-	["navigate option", ["navigate", url, "--no-sandbox"]],
 ] as const) {
 	for (const mode of ["direct", "stdin", "raw"] as const) {
 		test(`Chromium launch argument diagnostic before dispatch: ${label}/${mode}`, { concurrency: false }, async () => {
@@ -79,6 +77,8 @@ for (const [label, step] of [
 }
 
 test("Chromium diagnostic uses native top-level globals but raw batch tokens", () => {
+	assert.match(validateToolArgs(["goto", "--no-sandbox", url]) ?? "", /ignored.*option/);
+	assert.match(validateToolArgs(["navigate", url, "--no-sandbox"]) ?? "", /ignored.*option/);
 	assert.match(validateToolArgs(["--args", "--disable-gpu", "--no-sandbox", "open", url]) ?? "", /not an agent-browser command/);
 	assert.equal(validateToolArgs(["open", url, "--args", "--no-sandbox"]), undefined);
 	assert.match(validateToolArgs(["open", url, "--args", "--no-sandbox"], { batchStep: true }) ?? "", /ignored.*option/);
@@ -94,7 +94,6 @@ test("Chromium diagnostic uses native top-level globals but raw batch tokens", (
 });
 
 for (const args of [
-	["--args", "--no-sandbox", "open", url],
 	["--args", "--disable-gpu,--no-sandbox", "open", url],
 	["open", url, "--args", "--disable-gpu\n--no-sandbox"],
 	["--headers", '{"X-Flag":"--no-sandbox"}', "open", url],

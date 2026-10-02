@@ -8,7 +8,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-import { WEB_SEARCH_PROMPT_GUIDELINE } from "../extensions/agent-browser/lib/playbook.js";
 import { buildPromptPolicy, getLatestUserMessage, getMessageText } from "../extensions/agent-browser/lib/prompt-policy.js";
 
 test("prompt policy restores the latest raw user intent without projecting or copying historical context", () => {
@@ -320,18 +319,4 @@ test("buildPromptPolicy associates output intent with its path and rejects negat
 		buildPromptPolicy("Save a screenshot here:\n/tmp/output.png\n/var/folders/xx/T/pi-clipboard-input.png").requestedArtifacts,
 		[{ kind: "screenshot", path: "/tmp/output.png", required: true }],
 	);
-});
-
-test("web-search prompt guidance warns about anti-bot search form automation", () => {
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /Prefer agent_browser_web_search for current or external web facts/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /public search-engine forms/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /anti-bot\/CAPTCHA-gated/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /searchType: deep-lite/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /omit it for everyday lookups/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /Provider rank is not proof of authority/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /primary current docs/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /Exa includeDomains; Brave site:/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /URL aliases/);
-	assert.match(WEB_SEARCH_PROMPT_GUIDELINE, /after you have a target URL/);
-	assert.doesNotMatch(WEB_SEARCH_PROMPT_GUIDELINE, /one query, one follow-up max/);
 });

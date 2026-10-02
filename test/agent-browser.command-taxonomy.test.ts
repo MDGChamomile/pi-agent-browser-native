@@ -78,20 +78,15 @@ test("WebMCP mutation commands invalidate refs while list remains read-only", ()
 });
 
 test("recording FPS without a URL preserves restart refs", () => {
-	for (const operands of [["take.webm", "--fps", "30"], ["--fps", "+24", "take.webm"], ["--fps", "12", "take.webm", "--fps", "24"]]) {
+	// `out.webm` is the bare path-operand form without Chromium-style flags.
+	for (const operands of [["take.webm", "--fps", "30"], ["--fps", "+24", "take.webm"], ["--fps", "12", "take.webm", "--fps", "24"], ["out.webm"]]) {
 		assert.equal(isRecordPageTransitionCommand(["record", "restart", ...operands]), false);
 		assert.equal(isRefInvalidatingBatchCommand(["record", "restart", ...operands]), false);
+		assert.equal(isRecordPageTransitionCommand(["record", "start", ...operands]), true, "older native starts replace the page even on failure");
 		assert.equal(isRefInvalidatingBatchCommand(["record", "start", ...operands]), true, "older native starts still need conservative ref protection");
 		assert.equal(isRecordPageTransitionCommand(["record", "restart", ...operands, "https://example.com"]), true);
+		assert.equal(isRefInvalidatingBatchCommand(["record", "restart", ...operands, "https://example.com"]), true, "a navigating restart replaces the page");
 	}
-});
-
-test("record page transitions cover failed starts and navigating restarts", () => {
-	assert.equal(isRecordPageTransitionCommand(["record", "start", "out.webm"]), true);
-	assert.equal(isRecordPageTransitionCommand(["record", "restart", "out.webm"]), false);
-	assert.equal(isRecordPageTransitionCommand(["record", "restart", "out.webm", "https://example.com"]), true);
 	assert.equal(isRecordPageTransitionCommand(["record", "stop"]), false);
-	assert.equal(isRefInvalidatingBatchCommand(["record", "start", "out.webm"]), true);
-	assert.equal(isRefInvalidatingBatchCommand(["record", "restart", "out.webm"]), false);
-	assert.equal(isRefInvalidatingBatchCommand(["record", "restart", "out.webm", "example.com"]), true);
+	assert.equal(isRefInvalidatingBatchCommand(["record", "stop"]), false);
 });

@@ -20,7 +20,6 @@ import {
 import {
 	chooseOpenResultTabCorrection,
 	extractCommandTokens,
-	parseCommandInfo,
 	validateToolArgs,
 } from "../extensions/agent-browser/lib/runtime.js";
 
@@ -444,23 +443,6 @@ test("buildAgentBrowserNextActions returns exact native-tool recommendations for
 		],
 	);
 	assert.equal(buildAgentBrowserNextActions({ resultCategory: "success", successCategory: "completed" }), undefined);
-});
-
-test("parseCommandInfo skips global flags with values", () => {
-	const commandInfo = parseCommandInfo(["--session", "named", "--profile", "./profile", "tab", "list"]);
-	assert.deepEqual(commandInfo, { command: "tab", subcommand: "list" });
-});
-
-test("parseCommandInfo treats compatibility and launch flag values as non-command tokens", () => {
-	const commandInfo = parseCommandInfo([
-		"--user-agent",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-		"--args",
-		"--disable-gpu,--lang=en-US",
-		"open",
-		"https://example.com",
-	]);
-	assert.deepEqual(commandInfo, { command: "open", subcommand: "https://example.com" });
 });
 
 test("extractCommandTokens strips wrapper-level global flags and keeps the command tail intact", () => {
