@@ -10,6 +10,13 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { buildNpmShimExecOptions } from "../scripts/doctor.mjs";
+
+test("doctor exec options route npm global shims through a shell only on Windows", () => {
+	assert.deepEqual(buildNpmShimExecOptions("win32"), { shell: true });
+	assert.deepEqual(buildNpmShimExecOptions("darwin"), {});
+	assert.deepEqual(buildNpmShimExecOptions("linux"), {});
+});
 
 import { CAPABILITY_BASELINE } from "../scripts/agent-browser-capability-baseline.mjs";
 

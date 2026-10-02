@@ -14,6 +14,7 @@ import {
 	validateAgentBrowserScriptSource,
 	runAgentBrowserScript,
 	validateAgentBrowserScriptBrowserParams,
+	resolveScriptChildNodePath,
 	type AgentBrowserScriptBrowserEnvelope,
 } from "../extensions/agent-browser/lib/input-modes/script.js";
 import { createBrowserCodeOutput } from "../extensions/agent-browser/lib/orchestration/script-mode.js";
@@ -22,6 +23,18 @@ import { BROWSER_TRANSITION_ENTRY, getBrowserRecord } from "../extensions/agent-
 import { getAgentBrowserSessionIdentityKey } from "../extensions/agent-browser/lib/argv-grammar.js";
 import { SessionPageState } from "../extensions/agent-browser/lib/session-page-state.js";
 import { createExtensionHarness, executeRegisteredTool, readInvocationLog, runExtensionEvent, withPatchedEnv, writeFakeAgentBrowserBinary } from "./helpers/agent-browser-harness.js";
+
+test("code child resolves a real Node runtime on Bun binaries and fails clearly without one", () => {
+	assert.equal(resolveScriptChildNodePath({ runtime: {}, execPath: "/usr/bin/node", whichNode: () => "/usr/bin/node" }), "/usr/bin/node");
+	assert.equal(
+		resolveScriptChildNodePath({ runtime: { bun: "1.2.0" }, execPath: "/usr/local/bin/pi", whichNode: () => "/opt/node/bin/node" }),
+		"/opt/node/bin/node",
+	);
+	assert.throws(
+		() => resolveScriptChildNodePath({ runtime: { bun: "1.2.0" }, execPath: "/usr/local/bin/pi", whichNode: () => null }),
+		/requires a `node` runtime on PATH when pi runs on a Bun binary/,
+	);
+});
 
 const successEnvelope = (data: unknown): AgentBrowserScriptBrowserEnvelope => ({
 	data, success: true, resultCategory: "success", successCategory: "inspection", summary: "Browser call completed.",
